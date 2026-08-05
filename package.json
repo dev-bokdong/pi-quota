@@ -1,0 +1,57 @@
+{
+	"name": "pi-quota",
+	"version": "0.1.0",
+	"description": "OpenAI Codex and Anthropic subscription quota lookup for Senpi. Adds a local /quota command that reuses Senpi-managed OAuth credentials.",
+	"type": "module",
+	"license": "MIT",
+	"author": "\uBCF5\uB35D <bokdong9417@gmail.com>",
+	"homepage": "https://github.com/bok-dong/pi-quota",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bok-dong/pi-quota.git"
+	},
+	"bugs": {
+		"url": "https://github.com/bok-dong/pi-quota/issues"
+	},
+	"keywords": [
+		"pi",
+		"pi-mono",
+		"senpi",
+		"pi-extension",
+		"pi-package",
+		"quota",
+		"openai",
+		"anthropic",
+		"usage",
+		"typescript"
+	],
+	"pi": {
+		"extensions": ["./src/index.ts"]
+	},
+	"files": ["src", "README.md", "LICENSE"],
+	"scripts": {
+		"typecheck": "tsgo --noEmit",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"test": "vitest --run",
+		"test:watch": "vitest",
+		"check": "tsgo --noEmit && biome check ."
+	},
+	"peerDependencies": {
+		"@code-yeongyu/senpi": "*",
+		"@earendil-works/pi-ai": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.7",
+		"@types/node": "^26.1.2",
+		"@typescript/native-preview": "^7.0.0-dev.20260707.2",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.10"
+	},
+	"engines": {
+		"node": ">=24.0.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
