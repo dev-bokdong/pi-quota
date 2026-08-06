@@ -8,15 +8,15 @@ const PROVIDER_ID = "openai-codex" as const;
 const DISPLAY_NAME = "OpenAI";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
-type WindowKind = "5h" | "Weekly" | "Monthly";
+type WindowKind = "Five-hour" | "Weekly" | "Monthly";
 
 const WINDOW_KIND_BY_DURATION: Readonly<Record<number, WindowKind>> = {
-	18000: "5h",
+	18000: "Five-hour",
 	604800: "Weekly",
 	2628000: "Monthly",
 };
 
-const WINDOW_ORDER: readonly WindowKind[] = ["5h", "Weekly", "Monthly"];
+const WINDOW_ORDER: readonly WindowKind[] = ["Five-hour", "Weekly", "Monthly"];
 const CODE_REVIEW_LABEL = "Code Review";
 
 export interface OpenAiQuotaOptions {

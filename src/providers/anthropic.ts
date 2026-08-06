@@ -60,7 +60,7 @@ function parseUsage(payload: unknown): ProviderResult {
 	if (!root) {
 		return { kind: "failure", provider: PROVIDER_ID, reason: { type: "invalid-response" } };
 	}
-	const fiveHour = parseWindow("5h", root.five_hour ?? root.fiveHour);
+	const fiveHour = parseWindow("Five-hour", root.five_hour ?? root.fiveHour);
 	const sevenDay = parseWindow("Weekly", root.seven_day ?? root.sevenDay);
 	if (!fiveHour || !sevenDay) {
 		return { kind: "unavailable", provider: PROVIDER_ID, reason: "no-quota-windows" };

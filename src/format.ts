@@ -9,22 +9,31 @@ const BAR_EMPTY = "░";
 /** Reset times are right-aligned to the bar's right edge. */
 const ROW_WIDTH = ROW_INDENT.length + BAR_WIDTH;
 
-function displayNameForProvider(provider: ProviderResult["provider"]): string {
-	return provider === "openai-codex" ? "OpenAI" : "Anthropic";
+function bracketed(name: string): string {
+	return `[${name}]`;
 }
 
+function displayNameForProvider(provider: ProviderResult["provider"]): string {
+	return bracketed(provider === "openai-codex" ? "OpenAI" : "Anthropic");
+}
+
+/**
+ * Renders the remaining time at one granularity: whole days from 24h up,
+ * half-hours below 24h, whole minutes below 1h. Every step rounds down so the
+ * displayed time never overstates what is left.
+ */
 function formatResetTime(resetAt: Date, now: Date): string {
 	const differenceMilliseconds = resetAt.getTime() - now.getTime();
 	if (differenceMilliseconds <= 0) return "now";
 
 	const totalMinutes = Math.floor(differenceMilliseconds / 60_000);
-	const days = Math.floor(totalMinutes / (24 * 60));
-	const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-	const minutes = totalMinutes % 60;
-	const paddedMinutes = `${minutes.toString().padStart(2, "0")}m`;
+	if (totalMinutes < 60) return `${totalMinutes}m`;
 
-	if (days > 0) return `${days}d ${hours}h ${paddedMinutes}`;
-	return `${hours}h ${paddedMinutes}`;
+	const days = Math.floor(totalMinutes / (24 * 60));
+	if (days > 0) return `${days}d`;
+
+	const halfHours = Math.floor(totalMinutes / 30) / 2;
+	return `${halfHours}h`;
 }
 
 function progressBar(percent: number): string {
@@ -81,7 +90,7 @@ function formatFailure(result: ProviderFailure): string {
 function formatSuccess(result: Extract<ProviderResult, { kind: "success" }>, now: Date): string {
 	const lines = result.windows.flatMap((window) => formatWindow(window, now));
 
-	return [`${HEADER_INDENT}${result.displayName}`, ...lines].join("\n");
+	return [`${HEADER_INDENT}${bracketed(result.displayName)}`, ...lines].join("\n");
 }
 
 export function formatQuotaResults(

@@ -103,7 +103,7 @@ describe("fetchOpenAiQuota", () => {
 			provider: "openai-codex",
 			displayName: "OpenAI",
 			windows: [
-				{ label: "5h", remainingPercent: 82, resetAt: new Date(RESET_AT_MS) },
+				{ label: "Five-hour", remainingPercent: 82, resetAt: new Date(RESET_AT_MS) },
 				{ label: "Weekly", remainingPercent: 61, resetAt: new Date(RESET_AT_MS + 100_000) },
 				{ label: "Monthly", remainingPercent: 44, resetAt: new Date(RESET_AT_MS + 200_000) },
 				{ label: "Code Review", remainingPercent: 75 },
@@ -134,7 +134,7 @@ describe("fetchOpenAiQuota", () => {
 		expect(result.kind).toBe("success");
 		if (result.kind !== "success") return;
 		const [fiveHour, weekly] = result.windows;
-		expect(fiveHour).toEqual({ label: "5h", remainingPercent: 90 });
+		expect(fiveHour).toEqual({ label: "Five-hour", remainingPercent: 90 });
 		expect(weekly?.label).toBe("Weekly");
 		expect(weekly?.remainingPercent).toBe(80);
 		expect(weekly?.resetAt?.getTime()).toBeGreaterThanOrEqual(before + 3_600_000);
@@ -167,7 +167,7 @@ describe("fetchOpenAiQuota", () => {
 			kind: "success",
 			provider: "openai-codex",
 			displayName: "OpenAI",
-			windows: [{ label: "5h", remainingPercent: 70, resetAt: new Date(RESET_AT_MS) }],
+			windows: [{ label: "Five-hour", remainingPercent: 70, resetAt: new Date(RESET_AT_MS) }],
 		});
 	});
 
@@ -422,7 +422,7 @@ describe("fetchOpenAiQuota", () => {
 			provider: "openai-codex",
 			displayName: "OpenAI",
 			windows: [
-				{ label: "5h", remainingPercent: 0 },
+				{ label: "Five-hour", remainingPercent: 0 },
 				{ label: "Weekly", remainingPercent: 100 },
 				{ label: "Monthly", remainingPercent: 100 },
 			],

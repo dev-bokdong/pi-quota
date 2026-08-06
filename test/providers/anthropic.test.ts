@@ -88,7 +88,7 @@ describe("fetchAnthropicQuota", () => {
 			displayName: "Anthropic",
 			windows: [
 				{
-					label: "5h",
+					label: "Five-hour",
 					remainingPercent: 74,
 					resetAt: new Date("2026-08-06T12:00:00Z"),
 				},
@@ -115,7 +115,7 @@ describe("fetchAnthropicQuota", () => {
 			displayName: "Anthropic",
 			windows: [
 				{
-					label: "5h",
+					label: "Five-hour",
 					remainingPercent: 90,
 					resetAt: new Date("2026-08-06T15:30:00Z"),
 				},
@@ -141,7 +141,7 @@ describe("fetchAnthropicQuota", () => {
 			provider: "anthropic",
 			displayName: "Anthropic",
 			windows: [
-				{ label: "5h", remainingPercent: 100 },
+				{ label: "Five-hour", remainingPercent: 100 },
 				{ label: "Weekly", remainingPercent: 0 },
 			],
 		});
@@ -311,7 +311,7 @@ describe("fetchAnthropicQuota", () => {
 			provider: "anthropic",
 			displayName: "Anthropic",
 			windows: [
-				{ label: "5h", remainingPercent: 0 },
+				{ label: "Five-hour", remainingPercent: 0 },
 				{ label: "Weekly", remainingPercent: 100 },
 			],
 		});
