@@ -41,6 +41,10 @@
 		"@code-yeongyu/senpi": "*",
 		"@earendil-works/pi-ai": "*"
 	},
+	"peerDependenciesMeta": {
+		"@code-yeongyu/senpi": { "optional": true },
+		"@earendil-works/pi-ai": { "optional": true }
+	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.7",
 		"@types/node": "^26.1.2",
