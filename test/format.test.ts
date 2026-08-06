@@ -41,18 +41,31 @@ const anthropicSuccess = {
 } as const satisfies ProviderResult;
 
 describe("formatQuotaResults", () => {
-	it("formats successful providers as aligned multi-window blocks", () => {
+	it("formats successful providers as indented bar blocks", () => {
 		expect(formatQuotaResults([openAiSuccess, anthropicSuccess], now)).toBe(
 			[
-				"OpenAI",
-				"  5h      82% left · resets in 2h 14m",
-				"  Weekly  61% left · resets in 2d 2h 14m",
+				"   OpenAI",
+				"     5h                 2h 14m",
+				"     █████████████████████░░░░ 82%",
+				"     Weekly          2d 2h 14m",
+				"     ███████████████░░░░░░░░░░ 61%",
 				"",
-				"Anthropic",
-				"  5h      74% left · resets in 1h 03m",
-				"  Weekly  48% left · resets in 2d 5h 14m",
+				"   Anthropic",
+				"     5h                 1h 03m",
+				"     ███████████████████░░░░░░ 74%",
+				"     Weekly          2d 5h 14m",
+				"     ████████████░░░░░░░░░░░░░ 48%",
 			].join("\n"),
 		);
+	});
+
+	it("right-aligns every reset time to the bar's right edge", () => {
+		const lines = formatQuotaResults([openAiSuccess, anthropicSuccess], now)
+			.split("\n")
+			.filter((line) => line.startsWith("     ") && !line.includes("%"));
+
+		expect(lines).toHaveLength(4);
+		for (const line of lines) expect(line).toHaveLength(30);
 	});
 
 	it("omits reset text when a window has no reset time", () => {
@@ -61,15 +74,17 @@ describe("formatQuotaResults", () => {
 			windows: [{ label: "Monthly", remainingPercent: 50 }],
 		} as const satisfies ProviderResult;
 
-		expect(formatQuotaResults([result], now)).toBe("OpenAI\n  Monthly  50% left");
+		expect(formatQuotaResults([result], now)).toBe(
+			["   OpenAI", "     Monthly", "     █████████████░░░░░░░░░░░░ 50%"].join("\n"),
+		);
 	});
 
 	it("uses relative reset times within 24 hours", () => {
-		expect(formatQuotaResults([openAiSuccess], now)).toContain("resets in 2h 14m");
+		expect(formatQuotaResults([openAiSuccess], now)).toContain("2h 14m");
 	});
 
 	it("uses day-granular relative reset times beyond 24 hours", () => {
-		expect(formatQuotaResults([openAiSuccess], now)).toContain("resets in 2d 2h 14m");
+		expect(formatQuotaResults([openAiSuccess], now)).toContain("2d 2h 14m");
 	});
 
 	it("reports elapsed reset times as now", () => {
@@ -78,7 +93,11 @@ describe("formatQuotaResults", () => {
 			windows: [{ label: "5h", remainingPercent: 5, resetAt: new Date(2026, 7, 8, 6, 45) }],
 		} as const satisfies ProviderResult;
 
-		expect(formatQuotaResults([elapsed], now)).toBe("OpenAI\n  5h  5% left · resets now");
+		expect(formatQuotaResults([elapsed], now)).toBe(
+			["   OpenAI", "     5h                    now", "     █░░░░░░░░░░░░░░░░░░░░░░░░ 5%"].join(
+				"\n",
+			),
+		);
 	});
 
 	it("includes successful output alongside unavailable-provider explanations", () => {
@@ -90,11 +109,13 @@ describe("formatQuotaResults", () => {
 
 		expect(formatQuotaResults([openAiSuccess, unavailable], now)).toBe(
 			[
-				"OpenAI",
-				"  5h      82% left · resets in 2h 14m",
-				"  Weekly  61% left · resets in 2d 2h 14m",
+				"   OpenAI",
+				"     5h                 2h 14m",
+				"     █████████████████████░░░░ 82%",
+				"     Weekly          2d 2h 14m",
+				"     ███████████████░░░░░░░░░░ 61%",
 				"",
-				"Anthropic: not signed in with OAuth",
+				"   Anthropic: not signed in with OAuth",
 			].join("\n"),
 		);
 	});
@@ -106,7 +127,7 @@ describe("formatQuotaResults", () => {
 			reason: { type: "http-error", status: 500 },
 		} as const satisfies ProviderResult;
 
-		expect(formatQuotaResults([failure], now)).toBe("OpenAI: request failed (HTTP 500)");
+		expect(formatQuotaResults([failure], now)).toBe("   OpenAI: request failed (HTTP 500)");
 	});
 
 	it("does not throw for a successful result with empty windows", () => {
@@ -115,7 +136,7 @@ describe("formatQuotaResults", () => {
 			windows: [],
 		} as const satisfies ProviderResult;
 
-		expect(formatQuotaResults([emptySuccess], now)).toBe("OpenAI");
+		expect(formatQuotaResults([emptySuccess], now)).toBe("   OpenAI");
 	});
 });
 

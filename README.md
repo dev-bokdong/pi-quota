@@ -68,12 +68,15 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 실제 출력 예시:
 
 ```text
-OpenAI
-  Weekly     83% left · resets in 3d 2h 12m
+   OpenAI
+     Weekly          3d 2h 12m
+     █████████████████████░░░░ 83%
 
-Anthropic
-  5h         78% left · resets in 2h 53m
-  Weekly     74% left · resets in 2d 17h 55m
+   Anthropic
+     5h                 2h 53m
+     ████████████████████░░░░░ 78%
+     Weekly         2d 17h 55m
+     ███████████████████░░░░░░ 74%
 ```
 
 표시되는 창(5시간/주간/월간/코드 리뷰)은 응답에 실제로 포함된 항목만 나타나며,
@@ -98,13 +101,13 @@ Anthropic
   는 오류로 실패하지 않고 해당 제공자에 대해 다음과 같이 안내합니다.
 
   ```text
-  Anthropic: this account uses an API key, not OAuth - subscription quota isn't available
+     Anthropic: this account uses an API key, not OAuth - subscription quota isn't available
   ```
 
 - 아예 로그인되어 있지 않은 제공자는 다음과 같이 안내합니다.
 
   ```text
-  OpenAI: not signed in with OAuth
+     OpenAI: not signed in with OAuth
   ```
 
 - 로그인 저장소 파일을 직접 읽지 않습니다. Senpi의 모델 레지스트리 경계

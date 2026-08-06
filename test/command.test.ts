@@ -462,8 +462,8 @@ describe("quota command severity", () => {
 		const notification = firstNotify(fake);
 		expect(notification.type).toBe("warning");
 		expect(notification.message).toContain("OpenAI");
-		expect(notification.message).toContain("82% left");
-		expect(notification.message).toContain("61% left");
+		expect(notification.message).toContain("82%");
+		expect(notification.message).toContain("61%");
 		expect(notification.message).toContain("Anthropic");
 		expect(urls).toEqual([OPENAI_URL]);
 		expectNoSecretLeak(fake);
@@ -547,7 +547,7 @@ describe("quota command transport failures", () => {
 		const notification = firstNotify(fake);
 		expect(notification.type).toBe("warning");
 		expect(notification.message).toContain("HTTP 500");
-		expect(notification.message).toContain("74% left");
+		expect(notification.message).toContain("74%");
 		expectNoSecretLeak(fake);
 	});
 });

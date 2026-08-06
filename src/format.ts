@@ -1,5 +1,13 @@
-import type { ProviderFailure, ProviderResult, ProviderUnavailable } from "./types.ts";
+import type { ProviderFailure, ProviderResult, ProviderUnavailable, QuotaWindow } from "./types.ts";
 import { clampPercent } from "./types.ts";
+
+const HEADER_INDENT = " ".repeat(3);
+const ROW_INDENT = " ".repeat(5);
+const BAR_WIDTH = 25;
+const BAR_FILLED = "█";
+const BAR_EMPTY = "░";
+/** Reset times are right-aligned to the bar's right edge. */
+const ROW_WIDTH = ROW_INDENT.length + BAR_WIDTH;
 
 function displayNameForProvider(provider: ProviderResult["provider"]): string {
 	return provider === "openai-codex" ? "OpenAI" : "Anthropic";
@@ -15,8 +23,25 @@ function formatResetTime(resetAt: Date, now: Date): string {
 	const minutes = totalMinutes % 60;
 	const paddedMinutes = `${minutes.toString().padStart(2, "0")}m`;
 
-	if (days > 0) return `in ${days}d ${hours}h ${paddedMinutes}`;
-	return `in ${hours}h ${paddedMinutes}`;
+	if (days > 0) return `${days}d ${hours}h ${paddedMinutes}`;
+	return `${hours}h ${paddedMinutes}`;
+}
+
+function progressBar(percent: number): string {
+	const filled = Math.round((percent * BAR_WIDTH) / 100);
+	return `${BAR_FILLED.repeat(filled)}${BAR_EMPTY.repeat(BAR_WIDTH - filled)}`;
+}
+
+function formatWindow(window: QuotaWindow, now: Date): readonly string[] {
+	const percent = clampPercent(window.remainingPercent);
+	const head = `${ROW_INDENT}${window.label}`;
+	const resetText = window.resetAt ? formatResetTime(window.resetAt, now) : "";
+	const gap = " ".repeat(Math.max(1, ROW_WIDTH - head.length - resetText.length));
+
+	return [
+		resetText === "" ? head : `${head}${gap}${resetText}`,
+		`${ROW_INDENT}${progressBar(percent)} ${percent}%`,
+	];
 }
 
 function formatUnavailable(result: ProviderUnavailable): string {
@@ -27,7 +52,7 @@ function formatUnavailable(result: ProviderUnavailable): string {
 		"no-quota-windows": "no quota data in the response",
 	} as const;
 
-	return `${displayNameForProvider(result.provider)}: ${messages[result.reason]}`;
+	return `${HEADER_INDENT}${displayNameForProvider(result.provider)}: ${messages[result.reason]}`;
 }
 
 function formatFailure(result: ProviderFailure): string {
@@ -50,17 +75,13 @@ function formatFailure(result: ProviderFailure): string {
 
 	const retryMessage =
 		result.retryAfterSeconds === undefined ? "" : ` · retry in ${result.retryAfterSeconds}s`;
-	return `${displayNameForProvider(result.provider)}: ${message}${retryMessage}`;
+	return `${HEADER_INDENT}${displayNameForProvider(result.provider)}: ${message}${retryMessage}`;
 }
 
 function formatSuccess(result: Extract<ProviderResult, { kind: "success" }>, now: Date): string {
-	const labelWidth = Math.max(0, ...result.windows.map((window) => window.label.length));
-	const lines = result.windows.map((window) => {
-		const resetText = window.resetAt ? ` · resets ${formatResetTime(window.resetAt, now)}` : "";
-		return `  ${window.label.padEnd(labelWidth)}  ${clampPercent(window.remainingPercent)}% left${resetText}`;
-	});
+	const lines = result.windows.flatMap((window) => formatWindow(window, now));
 
-	return [result.displayName, ...lines].join("\n");
+	return [`${HEADER_INDENT}${result.displayName}`, ...lines].join("\n");
 }
 
 export function formatQuotaResults(
