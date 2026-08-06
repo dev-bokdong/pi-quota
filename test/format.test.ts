@@ -46,11 +46,11 @@ describe("formatQuotaResults", () => {
 			[
 				"OpenAI",
 				"  5h      82% left · resets in 2h 14m",
-				"  Weekly  61% left · resets Aug 10 09:00",
+				"  Weekly  61% left · resets in 2d 2h 14m",
 				"",
 				"Anthropic",
 				"  5h      74% left · resets in 1h 03m",
-				"  Weekly  48% left · resets Aug 10 12:00",
+				"  Weekly  48% left · resets in 2d 5h 14m",
 			].join("\n"),
 		);
 	});
@@ -68,8 +68,17 @@ describe("formatQuotaResults", () => {
 		expect(formatQuotaResults([openAiSuccess], now)).toContain("resets in 2h 14m");
 	});
 
-	it("uses absolute reset times beyond 24 hours", () => {
-		expect(formatQuotaResults([openAiSuccess], now)).toContain("resets Aug 10 09:00");
+	it("uses day-granular relative reset times beyond 24 hours", () => {
+		expect(formatQuotaResults([openAiSuccess], now)).toContain("resets in 2d 2h 14m");
+	});
+
+	it("reports elapsed reset times as now", () => {
+		const elapsed = {
+			...openAiSuccess,
+			windows: [{ label: "5h", remainingPercent: 5, resetAt: new Date(2026, 7, 8, 6, 45) }],
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([elapsed], now)).toBe("OpenAI\n  5h  5% left · resets now");
 	});
 
 	it("includes successful output alongside unavailable-provider explanations", () => {
@@ -83,7 +92,7 @@ describe("formatQuotaResults", () => {
 			[
 				"OpenAI",
 				"  5h      82% left · resets in 2h 14m",
-				"  Weekly  61% left · resets Aug 10 09:00",
+				"  Weekly  61% left · resets in 2d 2h 14m",
 				"",
 				"Anthropic: not signed in with OAuth",
 			].join("\n"),

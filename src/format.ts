@@ -1,40 +1,22 @@
 import type { ProviderFailure, ProviderResult, ProviderUnavailable } from "./types.ts";
 import { clampPercent } from "./types.ts";
 
-const MONTHS = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec",
-] as const;
-
 function displayNameForProvider(provider: ProviderResult["provider"]): string {
 	return provider === "openai-codex" ? "OpenAI" : "Anthropic";
 }
 
 function formatResetTime(resetAt: Date, now: Date): string {
 	const differenceMilliseconds = resetAt.getTime() - now.getTime();
-	const dayMilliseconds = 24 * 60 * 60 * 1000;
+	if (differenceMilliseconds <= 0) return "now";
 
-	if (differenceMilliseconds >= 0 && differenceMilliseconds < dayMilliseconds) {
-		const totalMinutes = Math.floor(differenceMilliseconds / 60_000);
-		const hours = Math.floor(totalMinutes / 60);
-		const minutes = totalMinutes % 60;
-		return `in ${hours}h ${minutes.toString().padStart(2, "0")}m`;
-	}
+	const totalMinutes = Math.floor(differenceMilliseconds / 60_000);
+	const days = Math.floor(totalMinutes / (24 * 60));
+	const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+	const minutes = totalMinutes % 60;
+	const paddedMinutes = `${minutes.toString().padStart(2, "0")}m`;
 
-	return `${MONTHS[resetAt.getMonth()]} ${resetAt.getDate()} ${resetAt
-		.getHours()
-		.toString()
-		.padStart(2, "0")}:${resetAt.getMinutes().toString().padStart(2, "0")}`;
+	if (days > 0) return `in ${days}d ${hours}h ${paddedMinutes}`;
+	return `in ${hours}h ${paddedMinutes}`;
 }
 
 function formatUnavailable(result: ProviderUnavailable): string {

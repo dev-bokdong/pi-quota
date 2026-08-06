@@ -69,11 +69,11 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 
 ```text
 OpenAI
-  Weekly     83% left · resets Aug 10 11:17
+  Weekly     83% left · resets in 3d 2h 12m
 
 Anthropic
   5h         78% left · resets in 2h 53m
-  Weekly     74% left · resets Aug 10 02:00
+  Weekly     74% left · resets in 2d 17h 55m
 ```
 
 표시되는 창(5시간/주간/월간/코드 리뷰)은 응답에 실제로 포함된 항목만 나타나며,
