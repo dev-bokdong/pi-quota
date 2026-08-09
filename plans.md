@@ -18,7 +18,7 @@ senpi install git:github.com/bok-dong/pi-quota
 
 ### 포함
 
-- Linux
+- Linux, Windows (macOS는 플랫폼 의존 코드가 없어 지원하나 미검증)
 - Senpi/Pi 확장 패키지
 - `/quota` 로컬 명령
 - Senpi가 관리하는 OpenAI Codex OAuth 인증
@@ -30,7 +30,6 @@ senpi install git:github.com/bok-dong/pi-quota
 
 ### 제외
 
-- macOS, Windows
 - 독립 실행형 CLI
 - OpenCode 플러그인 호환 계층
 - Claude CLI 및 `~/.claude/.credentials.json` 직접 조회
@@ -247,7 +246,7 @@ Anthropic
 
 1. `src/index.ts`에서 `quota` 명령을 등록한다.
 2. 인자를 받지 않으며, 인자가 있으면 사용법을 안내한다.
-3. Linux가 아니거나 `ctx.hasUI`가 false면 지원 범위를 안내하고 요청하지 않는다.
+3. `ctx.hasUI`가 false면 지원 범위를 안내하고 요청하지 않는다.
 4. 새 호출이 이전 `/quota` 호출을 취소하도록 실행별 AbortController를 관리한다.
 5. 실행 중 `ctx.ui.setStatus("pi-quota", "Loading quota…")`를 설정한다.
 6. 두 제공자 요청을 동시에 시작하고 독립적으로 결과를 수집한다.
@@ -261,7 +260,7 @@ Anthropic
 - `/quota`가 모델 턴을 시작하거나 컨텍스트 메시지를 추가하지 않음
 - 한 제공자 실패가 다른 제공자 결과를 숨기지 않음
 - 중복 실행에서는 최신 호출만 결과를 게시
-- 취소, 잘못된 인자, 비 Linux, 비 TUI에서 미처리 Promise나 HTTP 요청 없음
+- 취소, 잘못된 인자, 비 TUI에서 미처리 Promise나 HTTP 요청 없음
 - 알림과 status에 자격 증명 미노출
 
 ### 단계 6 — 패키징과 문서
@@ -307,7 +306,7 @@ Anthropic
 - 잘못된 JSON
 - 요청 취소와 제한시간
 - 연속 호출 시 이전 요청 취소와 stale 결과 차단
-- 비 Linux와 비 TUI의 조기 종료
+- 비 TUI의 조기 종료
 - status가 항상 정리됨
 
 시간 자체가 대상이 아닌 테스트에는 sleep이나 polling을 쓰지 않는다. 요청
