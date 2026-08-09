@@ -4,7 +4,7 @@ import type {
 	ExtensionContext,
 	SessionShutdownEvent,
 } from "@code-yeongyu/senpi";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuotaModelRegistry } from "../src/auth.ts";
 import type { HttpResponseLike } from "../src/http.ts";
 import registerQuotaExtension from "../src/index.ts";
@@ -292,10 +292,6 @@ function setPlatform(value: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", { value, configurable: true });
 }
 
-beforeEach(() => {
-	setPlatform("linux");
-});
-
 afterEach(() => {
 	setPlatform(REAL_PLATFORM);
 	vi.unstubAllGlobals();
@@ -397,21 +393,20 @@ describe("quota command guards", () => {
 		expect(firstNotify(fake).type).toBe("info");
 	});
 
-	it("shows the scope message and starts no request off Linux", async () => {
-		setPlatform("darwin");
-		const host = loadExtension();
-		const { urls } = stubSuccessFetch();
-		const fake = fakeContext({ registry: bothProvidersRegistry() });
+	for (const platform of ["linux", "darwin", "win32"] as const) {
+		it(`runs the full lookup on ${platform}`, async () => {
+			setPlatform(platform);
+			const host = loadExtension();
+			const { urls } = stubSuccessFetch();
+			const fake = fakeContext({ registry: bothProvidersRegistry() });
 
-		await quotaCommand(host).handler("", fake.ctx);
+			await quotaCommand(host).handler("", fake.ctx);
 
-		expect(fake.notifyCalls).toHaveLength(1);
-		const notification = firstNotify(fake);
-		expect(notification.type).toBe("info");
-		expect(notification.message.toLowerCase()).toContain("linux");
-		expect(fake.statusCalls).toHaveLength(0);
-		expect(urls).toHaveLength(0);
-	});
+			expect(fake.notifyCalls).toHaveLength(1);
+			expect(firstNotify(fake).type).toBe("info");
+			expect(new Set(urls)).toEqual(new Set([OPENAI_URL, ANTHROPIC_URL]));
+		});
+	}
 
 	it("shows the scope message and starts no request without dialog-capable UI", async () => {
 		const host = loadExtension();
@@ -426,16 +421,15 @@ describe("quota command guards", () => {
 		expect(urls).toHaveLength(0);
 	});
 
-	it("checks the argument guard before the platform guard", async () => {
-		setPlatform("win32");
+	it("checks the argument guard before the UI guard", async () => {
 		const host = loadExtension();
 		const { urls } = stubSuccessFetch();
-		const fake = fakeContext({ registry: bothProvidersRegistry() });
+		const fake = fakeContext({ registry: bothProvidersRegistry(), hasUI: false });
 
 		await quotaCommand(host).handler("bogus", fake.ctx);
 
 		expect(fake.notifyCalls).toHaveLength(1);
-		expect(firstNotify(fake).message.toLowerCase()).not.toContain("linux");
+		expect(firstNotify(fake).message.toLowerCase()).toMatch(/usage|argument|takes no/);
 		expect(urls).toHaveLength(0);
 	});
 });
