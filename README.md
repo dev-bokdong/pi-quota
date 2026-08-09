@@ -22,11 +22,10 @@ OpenAI Codex·Anthropic 사용량 조회에 집중합니다.
 | 항목 | 지원 |
 | --- | --- |
 | 명령 | `/quota` |
-| 운영체제 | Linux |
+| 운영체제 | Linux, Windows (macOS는 지원하나 미검증) |
 | OpenAI 인증 | `openai-codex` OAuth (Codex 구독) |
 | Anthropic 인증 | `anthropic` OAuth (Claude 구독) |
 | API 키 인증 | 지원 안 함 — 아래 [인증](#인증) 참고 |
-| macOS / Windows | 범위 밖 |
 | 기타 opencode-quota 제공자 | 범위 밖 |
 | 독립 실행형 CLI | 범위 밖 |
 | OpenCode 플러그인 호환성 | 범위 밖 |
@@ -122,7 +121,8 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 1. OpenCode API 대신 Senpi 확장 API를 사용합니다.
 2. `/quota` 명령 하나만 제공합니다.
 3. OpenAI Codex와 Anthropic OAuth 인증만 다룹니다.
-4. Linux에서만 동작을 보장합니다.
+4. Linux와 Windows에서 동작을 검증했습니다. macOS는 플랫폼 의존 코드가 없어
+   지원 대상이지만 실기기 검증은 하지 않았습니다.
 
 ## 개발 상태
 

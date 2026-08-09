@@ -7,8 +7,7 @@ import type { ProviderId, ProviderResult } from "./types.ts";
 const STATUS_KEY = "pi-quota";
 const LOADING_STATUS = "Loading quota...";
 const USAGE_MESSAGE = "/quota takes no arguments. Run /quota on its own to read your quota.";
-const SCOPE_MESSAGE =
-	"/quota is available on Linux in interactive mode only. No quota request was made.";
+const SCOPE_MESSAGE = "/quota is available in interactive mode only. No quota request was made.";
 const COMMAND_DESCRIPTION = "Show OpenAI Codex and Anthropic subscription quota";
 
 function isAbortError(error: unknown): boolean {
@@ -38,7 +37,7 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(USAGE_MESSAGE, "info");
 				return;
 			}
-			if (process.platform !== "linux" || !ctx.hasUI) {
+			if (!ctx.hasUI) {
 				ctx.ui.notify(SCOPE_MESSAGE, "info");
 				return;
 			}
