@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@code-yeongyu/senpi";
-import { formatQuotaResults, notifySeverityForResults } from "./format.ts";
+import { formatQuotaResults, notifySeverityForResults, whiteText } from "./format.ts";
 import { fetchAnthropicQuota } from "./providers/anthropic.ts";
 import { fetchOpenAiQuota } from "./providers/openai.ts";
 import type { ProviderId, ProviderResult } from "./types.ts";
@@ -61,7 +61,7 @@ export default function (pi: ExtensionAPI): void {
 				]);
 				if (currentController !== controller) return;
 				const results = [openai, anthropic];
-				ctx.ui.notify(formatQuotaResults(results), notifySeverityForResults(results));
+				ctx.ui.notify(whiteText(formatQuotaResults(results)), notifySeverityForResults(results));
 			} catch {
 				// Only this invocation's own cancellation reaches here, which means a
 				// newer invocation or the session shutdown owns the UI now.

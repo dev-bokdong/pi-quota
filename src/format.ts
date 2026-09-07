@@ -1,6 +1,15 @@
 import type { ProviderFailure, ProviderResult, ProviderUnavailable, QuotaWindow } from "./types.ts";
 import { clampPercent } from "./types.ts";
 
+/**
+ * The host dims info notifications with its own theme color, so the quota
+ * block carries an explicit bright-white foreground run per line. Line-level
+ * runs survive the host re-styling or re-wrapping individual lines, and the
+ * foreground-only reset leaves the host's other attributes untouched.
+ */
+const WHITE = "\u001b[97m";
+const FOREGROUND_RESET = "\u001b[39m";
+
 const HEADER_INDENT = " ".repeat(3);
 const ROW_INDENT = " ".repeat(5);
 const BAR_WIDTH = 25;
@@ -113,6 +122,13 @@ export function formatQuotaResults(
 			}
 		})
 		.join("\n\n");
+}
+
+export function whiteText(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => (line === "" ? line : `${WHITE}${line}${FOREGROUND_RESET}`))
+		.join("\n");
 }
 
 export function notifySeverityForResults(

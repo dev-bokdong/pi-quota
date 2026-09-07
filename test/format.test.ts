@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatQuotaResults, notifySeverityForResults } from "../src/format.ts";
+import { formatQuotaResults, notifySeverityForResults, whiteText } from "../src/format.ts";
 import type { ProviderResult } from "../src/types.ts";
 
 const now = new Date(2026, 7, 8, 6, 46);
@@ -152,6 +152,22 @@ describe("formatQuotaResults", () => {
 		} as const satisfies ProviderResult;
 
 		expect(formatQuotaResults([emptySuccess], now)).toBe("   [OpenAI]");
+	});
+});
+
+describe("whiteText", () => {
+	it("wraps every non-empty line in its own bright-white run", () => {
+		expect(whiteText("first\n\nsecond")).toBe(
+			"\u001b[97mfirst\u001b[39m\n\n\u001b[97msecond\u001b[39m",
+		);
+	});
+
+	it("keeps the rendered text intact once the color codes are stripped", () => {
+		const rendered = whiteText(formatQuotaResults([openAiSuccess], now));
+
+		expect(rendered.replaceAll("\u001b[97m", "").replaceAll("\u001b[39m", "")).toBe(
+			formatQuotaResults([openAiSuccess], now),
+		);
 	});
 });
 
