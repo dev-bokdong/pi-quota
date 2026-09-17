@@ -79,7 +79,7 @@ function claudeSdkOauthLookups(
 	);
 }
 
-export default function (pi: ExtensionAPI): void {
+export default function(pi: ExtensionAPI): void {
 	let currentController: AbortController | undefined;
 
 	pi.registerCommand("quota", {
@@ -118,7 +118,13 @@ export default function (pi: ExtensionAPI): void {
 					...claudeSdkOauthLookups(registry, controller.signal),
 				]);
 				if (currentController !== controller) return;
-				ctx.ui.notify(whiteText(formatQuotaResults(results)), notifySeverityForResults(results));
+				// A provider holding no OAuth is not part of the answer, so an
+				// invocation that could read nothing has nothing to say and stays
+				// silent instead of reporting a sign-in the session never made.
+				const block = formatQuotaResults(results);
+				if (block !== "") {
+					ctx.ui.notify(whiteText(block), notifySeverityForResults(results));
+				}
 			} catch {
 				// Only this invocation's own cancellation reaches here, which means a
 				// newer invocation or the session shutdown owns the UI now.

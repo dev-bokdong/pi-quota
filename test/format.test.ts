@@ -119,7 +119,7 @@ describe("formatQuotaResults", () => {
 		const unavailable = {
 			kind: "unavailable",
 			provider: "anthropic",
-			reason: "oauth-not-configured",
+			reason: "no-quota-windows",
 		} as const satisfies ProviderResult;
 
 		expect(formatQuotaResults([openAiSuccess, unavailable], now)).toBe(
@@ -130,9 +130,34 @@ describe("formatQuotaResults", () => {
 				"     Weekly                 2d",
 				"     ███████████████░░░░░░░░░░ 61%",
 				"",
-				"   [Anthropic]: not signed in with OAuth",
+				"   [Anthropic]: no quota data in the response",
 			].join("\n"),
 		);
+	});
+
+	it("leaves out a provider that holds no OAuth instead of explaining it", () => {
+		const notConfigured = {
+			kind: "unavailable",
+			provider: "anthropic",
+			reason: "oauth-not-configured",
+		} as const satisfies ProviderResult;
+		const apiKeyOnly = {
+			kind: "unavailable",
+			provider: "claude-sdk-oauth",
+			reason: "unsupported-auth-method",
+			account: "work",
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([openAiSuccess, notConfigured, apiKeyOnly], now)).toBe(
+			[
+				"   [OpenAI]",
+				"     Five-hour              2h",
+				"     █████████████████████░░░░ 82%",
+				"     Weekly                 2d",
+				"     ███████████████░░░░░░░░░░ 61%",
+			].join("\n"),
+		);
+		expect(formatQuotaResults([notConfigured, apiKeyOnly], now)).toBe("");
 	});
 
 	it("renders HTTP failure statuses without error details", () => {
@@ -174,7 +199,7 @@ describe("formatQuotaResults", () => {
 		const unavailable = {
 			kind: "unavailable",
 			provider: "anthropic",
-			reason: "oauth-not-configured",
+			reason: "no-quota-windows",
 			account: "login-2",
 		} as const satisfies ProviderResult;
 		const failure = {
@@ -186,7 +211,7 @@ describe("formatQuotaResults", () => {
 
 		expect(formatQuotaResults([unavailable, failure], now)).toBe(
 			[
-				"   [Anthropic: login-2]: not signed in with OAuth",
+				"   [Anthropic: login-2]: no quota data in the response",
 				"",
 				"   [OpenAI: work]: request failed (HTTP 401)",
 			].join("\n"),
@@ -286,5 +311,21 @@ describe("notifySeverityForResults", () => {
 
 	it("returns info when every provider succeeded", () => {
 		expect(notifySeverityForResults([openAiSuccess, anthropicSuccess])).toBe("info");
+	});
+
+	it("ignores providers that hold no OAuth", () => {
+		const notConfigured = {
+			kind: "unavailable",
+			provider: "anthropic",
+			reason: "oauth-not-configured",
+		} as const satisfies ProviderResult;
+		const apiKeyOnly = {
+			kind: "unavailable",
+			provider: "claude-sdk-oauth",
+			reason: "unsupported-auth-method",
+		} as const satisfies ProviderResult;
+
+		expect(notifySeverityForResults([openAiSuccess, notConfigured, apiKeyOnly])).toBe("info");
+		expect(notifySeverityForResults([notConfigured, apiKeyOnly])).toBe("info");
 	});
 });

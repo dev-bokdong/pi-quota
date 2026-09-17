@@ -2,8 +2,10 @@ import type {
 	ProviderFailure,
 	ProviderId,
 	ProviderResult,
+	ProviderSuccess,
 	ProviderUnavailable,
 	QuotaWindow,
+	UnavailableReason,
 } from "./types.ts";
 import { clampPercent } from "./types.ts";
 
@@ -80,16 +82,36 @@ function formatWindow(window: QuotaWindow, now: Date): readonly string[] {
 	];
 }
 
-function formatUnavailable(result: ProviderUnavailable): string {
-	const messages = {
-		"oauth-not-configured": "not signed in with OAuth",
-		"unsupported-auth-method":
-			"this account uses an API key, not OAuth - subscription quota isn't available",
-		"token-expired": "the stored token has expired - sign in again to refresh it",
-		"no-quota-windows": "no quota data in the response",
-	} as const;
+/**
+ * Explanations for the unavailable outcomes the quota block reports. A reason
+ * missing from this record is one that only means the provider holds no OAuth
+ * to read, which `isReported` keeps out of the block entirely.
+ */
+const UNAVAILABLE_MESSAGES = {
+	"token-expired": "the stored token has expired - sign in again to refresh it",
+	"no-quota-windows": "no quota data in the response",
+} as const satisfies Partial<Record<UnavailableReason, string>>;
 
-	return `${HEADER_INDENT}${displayNameForProvider(result)}: ${messages[result.reason]}`;
+type ReportedUnavailable = ProviderUnavailable & {
+	readonly reason: keyof typeof UNAVAILABLE_MESSAGES;
+};
+
+type ReportedResult = ProviderSuccess | ReportedUnavailable | ProviderFailure;
+
+/**
+ * A provider whose credentials hold no OAuth - never signed in, or signed in
+ * with an API key - is left out of the answer rather than reported: the session
+ * never asked about that provider, so naming it would only add a warning about
+ * something that is not wrong.
+ */
+function isReported(result: ProviderResult): result is ReportedResult {
+	return result.kind !== "unavailable" || Object.hasOwn(UNAVAILABLE_MESSAGES, result.reason);
+}
+
+function formatUnavailable(result: ReportedUnavailable): string {
+	const message = UNAVAILABLE_MESSAGES[result.reason];
+
+	return `${HEADER_INDENT}${displayNameForProvider(result)}: ${message}`;
 }
 
 function formatFailure(result: ProviderFailure): string {
@@ -115,17 +137,23 @@ function formatFailure(result: ProviderFailure): string {
 	return `${HEADER_INDENT}${displayNameForProvider(result)}: ${message}${retryMessage}`;
 }
 
-function formatSuccess(result: Extract<ProviderResult, { kind: "success" }>, now: Date): string {
+function formatSuccess(result: ProviderSuccess, now: Date): string {
 	const lines = result.windows.flatMap((window) => formatWindow(window, now));
 
 	return [`${HEADER_INDENT}${bracketed(result.displayName, result.account)}`, ...lines].join("\n");
 }
 
+/**
+ * Renders the quota block, which holds one entry per provider the session could
+ * actually read. An empty string means nothing was readable at all and there is
+ * therefore nothing to show.
+ */
 export function formatQuotaResults(
 	results: readonly ProviderResult[],
 	now: Date = new Date(),
 ): string {
 	return results
+		.filter(isReported)
 		.map((result) => {
 			switch (result.kind) {
 				case "success":
@@ -150,10 +178,17 @@ export function whiteText(text: string): string {
 		.join("\n");
 }
 
+/**
+ * Severity of the rendered block, judged only by the providers it reports: a
+ * provider left out for holding no OAuth cannot turn a complete answer into a
+ * warning. Nothing left to report carries no severity of its own - that block
+ * is empty and never shown.
+ */
 export function notifySeverityForResults(
 	results: readonly ProviderResult[],
 ): "error" | "warning" | "info" {
-	if (results.every((result) => result.kind !== "success")) return "error";
-	if (results.every((result) => result.kind === "success")) return "info";
+	const reported = results.filter(isReported);
+	if (reported.every((result) => result.kind === "success")) return "info";
+	if (reported.every((result) => result.kind !== "success")) return "error";
 	return "warning";
 }

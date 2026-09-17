@@ -278,8 +278,8 @@ function stubGatedFetch(): GatedFetch {
 			started >= count
 				? Promise.resolve()
 				: new Promise<void>((resolve) => {
-						waiters.push({ count, resolve });
-					}),
+					waiters.push({ count, resolve });
+				}),
 		release: () => {
 			released = true;
 			for (const settle of pendingSettles.splice(0)) settle();
@@ -461,7 +461,7 @@ describe("quota command with pooled credential accounts", () => {
 		expectNoSecretLeak(fake);
 	});
 
-	it("keeps one account's quota when a sibling account resolves no credential", async () => {
+	it("keeps one account's quota and hides a sibling that resolves no credential", async () => {
 		const host = loadExtension();
 		const { urls } = stubSuccessFetch();
 		const fake = fakeContext({
@@ -477,9 +477,11 @@ describe("quota command with pooled credential accounts", () => {
 		await quotaCommand(host).handler("", fake.ctx);
 
 		const notification = firstNotify(fake);
-		expect(notification.type).toBe("warning");
-		expect(notification.message).toContain("[OpenAI: work]: not signed in with OAuth");
+		expect(notification.type).toBe("info");
+		expect(notification.message).toContain("[OpenAI: default]");
 		expect(notification.message).toContain("Five-hour");
+		expect(notification.message).not.toContain("work");
+		expect(notification.message).not.toContain("OAuth");
 		expect(urls.filter((url) => url === OPENAI_URL)).toHaveLength(1);
 		expectNoSecretLeak(fake);
 	});
@@ -587,7 +589,7 @@ describe("quota command severity", () => {
 		expect(firstNotify(fake).type).toBe("info");
 	});
 
-	it("uses warning and still shows the working provider when the other has no OAuth", async () => {
+	it("stays info and leaves out the provider that has no OAuth", async () => {
 		const host = loadExtension();
 		const { urls } = stubFetch(async (url) => jsonResponse(usageFor(url)));
 		const fake = fakeContext({ registry: openAiOnlyRegistry() });
@@ -596,24 +598,27 @@ describe("quota command severity", () => {
 
 		expect(fake.notifyCalls).toHaveLength(1);
 		const notification = firstNotify(fake);
-		expect(notification.type).toBe("warning");
+		expect(notification.type).toBe("info");
 		expect(notification.message).toContain("OpenAI");
 		expect(notification.message).toContain("82%");
 		expect(notification.message).toContain("61%");
-		expect(notification.message).toContain("Anthropic");
+		expect(notification.message).not.toContain("Anthropic");
 		expect(urls).toEqual([OPENAI_URL]);
 		expectNoSecretLeak(fake);
 	});
 
-	it("uses error when neither provider has OAuth configured", async () => {
+	it("notifies nothing when no provider has OAuth configured", async () => {
 		const host = loadExtension();
 		const { urls } = stubSuccessFetch();
 		const fake = fakeContext({ registry: noOAuthRegistry() });
 
 		await quotaCommand(host).handler("", fake.ctx);
 
-		expect(fake.notifyCalls).toHaveLength(1);
-		expect(firstNotify(fake).type).toBe("error");
+		expect(fake.notifyCalls).toHaveLength(0);
+		expect(fake.statusCalls).toEqual([
+			{ key: STATUS_KEY, text: LOADING_TEXT },
+			{ key: STATUS_KEY, text: undefined },
+		]);
 		expect(urls).toHaveLength(0);
 	});
 });
@@ -836,45 +841,67 @@ describe("quota command credential safety", () => {
 		const host = loadExtension();
 		const command = quotaCommand(host);
 
-		const paths: ReadonlyArray<() => Promise<FakeContext>> = [
-			async () => {
-				stubSuccessFetch();
-				const fake = fakeContext({ registry: bothProvidersRegistry() });
-				await command.handler("", fake.ctx);
-				return fake;
+		interface SafetyPath {
+			/**
+			 * Whether the path has anything to show. A path whose providers all
+			 * resolve to no OAuth shows nothing, and its silence is asserted here so
+			 * the leak check below can never pass for the wrong reason.
+			 */
+			readonly notifies: boolean;
+			readonly run: () => Promise<FakeContext>;
+		}
+
+		const paths: readonly SafetyPath[] = [
+			{
+				notifies: true,
+				run: async () => {
+					stubSuccessFetch();
+					const fake = fakeContext({ registry: bothProvidersRegistry() });
+					await command.handler("", fake.ctx);
+					return fake;
+				},
 			},
-			async () => {
-				stubFetch(async () => errorResponse(401));
-				const fake = fakeContext({ registry: bothProvidersRegistry() });
-				await command.handler("", fake.ctx);
-				return fake;
+			{
+				notifies: true,
+				run: async () => {
+					stubFetch(async () => errorResponse(401));
+					const fake = fakeContext({ registry: bothProvidersRegistry() });
+					await command.handler("", fake.ctx);
+					return fake;
+				},
 			},
-			async () => {
-				stubFetch(async () => {
-					throw new TypeError(`fetch failed with ${SECRET_TOKEN}`);
-				});
-				const fake = fakeContext({ registry: bothProvidersRegistry() });
-				await command.handler("", fake.ctx);
-				return fake;
+			{
+				notifies: true,
+				run: async () => {
+					stubFetch(async () => {
+						throw new TypeError(`fetch failed with ${SECRET_TOKEN}`);
+					});
+					const fake = fakeContext({ registry: bothProvidersRegistry() });
+					await command.handler("", fake.ctx);
+					return fake;
+				},
 			},
-			async () => {
-				stubSuccessFetch();
-				const registry: QuotaModelRegistry = {
-					getAvailable: () => [{ provider: "openai-codex" }, { provider: "anthropic" }],
-					isUsingOAuth: () => true,
-					getApiKeyAndHeaders: async () => {
-						throw new Error(`token ${SECRET_TOKEN} is expired`);
-					},
-				};
-				const fake = fakeContext({ registry });
-				await command.handler("", fake.ctx);
-				return fake;
+			{
+				notifies: false,
+				run: async () => {
+					stubSuccessFetch();
+					const registry: QuotaModelRegistry = {
+						getAvailable: () => [{ provider: "openai-codex" }, { provider: "anthropic" }],
+						isUsingOAuth: () => true,
+						getApiKeyAndHeaders: async () => {
+							throw new Error(`token ${SECRET_TOKEN} is expired`);
+						},
+					};
+					const fake = fakeContext({ registry });
+					await command.handler("", fake.ctx);
+					return fake;
+				},
 			},
 		];
 
-		for (const run of paths) {
-			const fake = await run();
-			expect(fake.notifyCalls.length).toBeGreaterThan(0);
+		for (const path of paths) {
+			const fake = await path.run();
+			expect(fake.notifyCalls.length > 0).toBe(path.notifies);
 			expectNoSecretLeak(fake);
 			vi.unstubAllGlobals();
 		}
