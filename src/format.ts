@@ -18,12 +18,17 @@ const BAR_EMPTY = "░";
 /** Reset times are right-aligned to the bar's right edge. */
 const ROW_WIDTH = ROW_INDENT.length + BAR_WIDTH;
 
-function bracketed(name: string): string {
-	return `[${name}]`;
+/**
+ * The account label appears only for a provider that pools more than one
+ * account, which is exactly when the adapter sets it: single-account output
+ * stays the bare provider name.
+ */
+function bracketed(name: string, account?: string): string {
+	return account === undefined ? `[${name}]` : `[${name}: ${account}]`;
 }
 
-function displayNameForProvider(provider: ProviderResult["provider"]): string {
-	return bracketed(provider === "openai-codex" ? "OpenAI" : "Anthropic");
+function displayNameForProvider(result: ProviderUnavailable | ProviderFailure): string {
+	return bracketed(result.provider === "openai-codex" ? "OpenAI" : "Anthropic", result.account);
 }
 
 /**
@@ -70,7 +75,7 @@ function formatUnavailable(result: ProviderUnavailable): string {
 		"no-quota-windows": "no quota data in the response",
 	} as const;
 
-	return `${HEADER_INDENT}${displayNameForProvider(result.provider)}: ${messages[result.reason]}`;
+	return `${HEADER_INDENT}${displayNameForProvider(result)}: ${messages[result.reason]}`;
 }
 
 function formatFailure(result: ProviderFailure): string {
@@ -93,13 +98,13 @@ function formatFailure(result: ProviderFailure): string {
 
 	const retryMessage =
 		result.retryAfterSeconds === undefined ? "" : ` · retry in ${result.retryAfterSeconds}s`;
-	return `${HEADER_INDENT}${displayNameForProvider(result.provider)}: ${message}${retryMessage}`;
+	return `${HEADER_INDENT}${displayNameForProvider(result)}: ${message}${retryMessage}`;
 }
 
 function formatSuccess(result: Extract<ProviderResult, { kind: "success" }>, now: Date): string {
 	const lines = result.windows.flatMap((window) => formatWindow(window, now));
 
-	return [`${HEADER_INDENT}${bracketed(result.displayName)}`, ...lines].join("\n");
+	return [`${HEADER_INDENT}${bracketed(result.displayName, result.account)}`, ...lines].join("\n");
 }
 
 export function formatQuotaResults(

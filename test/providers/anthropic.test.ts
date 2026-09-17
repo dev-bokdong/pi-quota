@@ -364,3 +364,78 @@ describe("fetchAnthropicQuota", () => {
 		});
 	});
 });
+
+const ACCOUNT_TOKEN = "sk-ant-account-canary-abc";
+const ACCOUNT = { name: "login-2", label: "personal" } as const;
+
+/** Registry whose slot-scoped auth answers with a token of its own. */
+function accountRegistry(slotAuth?: (slotName: string) => unknown): QuotaModelRegistry {
+	return {
+		...oauthRegistry(),
+		modelRuntime: {
+			getAuth: async (_provider: unknown, overrides: unknown) => {
+				const slotName =
+					typeof overrides === "object" && overrides !== null
+						? Reflect.get(overrides, "slotName")
+						: undefined;
+				if (typeof slotName !== "string") return undefined;
+				if (slotAuth) return slotAuth(slotName);
+				return { auth: { apiKey: `${ACCOUNT_TOKEN}-${slotName}` } };
+			},
+		},
+	};
+}
+
+describe("fetchAnthropicQuota for one credential account", () => {
+	it("authenticates with that account's token and labels the result", async () => {
+		const { fetch, calls } = recordingFetch(() =>
+			jsonResponse({ five_hour: { utilization: 26 }, seven_day: { utilization: 52 } }),
+		);
+
+		const result = await fetchAnthropicQuota(accountRegistry(), { fetch, account: ACCOUNT });
+
+		expect(result).toEqual({
+			kind: "success",
+			provider: "anthropic",
+			displayName: "Anthropic",
+			account: "personal",
+			windows: [
+				{ label: "Five-hour", remainingPercent: 74 },
+				{ label: "Weekly", remainingPercent: 48 },
+			],
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.headers["Authorization"]).toBe(`Bearer ${ACCOUNT_TOKEN}-login-2`);
+	});
+
+	it("labels an account that resolves no token and sends no request", async () => {
+		const { fetch, calls } = recordingFetch(() => jsonResponse({}));
+
+		const result = await fetchAnthropicQuota(
+			accountRegistry(() => undefined),
+			{ fetch, account: ACCOUNT },
+		);
+
+		expect(result).toEqual({
+			kind: "unavailable",
+			provider: "anthropic",
+			reason: "oauth-not-configured",
+			account: "personal",
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	it("labels a failed account lookup", async () => {
+		const { fetch } = recordingFetch(() => errorResponse(429, "30"));
+
+		const result = await fetchAnthropicQuota(accountRegistry(), { fetch, account: ACCOUNT });
+
+		expect(result).toEqual({
+			kind: "failure",
+			provider: "anthropic",
+			reason: { type: "http-error", status: 429 },
+			retryAfterSeconds: 30,
+			account: "personal",
+		});
+	});
+});

@@ -1,8 +1,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@code-yeongyu/senpi";
+import type { QuotaModelRegistry } from "./auth.ts";
+import { listQuotaAccounts } from "./auth.ts";
 import { formatQuotaResults, notifySeverityForResults, whiteText } from "./format.ts";
 import { fetchAnthropicQuota } from "./providers/anthropic.ts";
 import { fetchOpenAiQuota } from "./providers/openai.ts";
-import type { ProviderId, ProviderResult } from "./types.ts";
+import type { AccountFields, ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
+import { accountFields } from "./types.ts";
 
 const STATUS_KEY = "pi-quota";
 const LOADING_STATUS = "Loading quota...";
@@ -20,11 +23,40 @@ function isAbortError(error: unknown): boolean {
  * downgraded to a failure result rather than being allowed to hide the other
  * provider's answer or crash the command.
  */
-function guarded(pending: Promise<ProviderResult>, provider: ProviderId): Promise<ProviderResult> {
+function guarded(
+	pending: Promise<ProviderResult>,
+	provider: ProviderId,
+	account: AccountFields,
+): Promise<ProviderResult> {
 	return pending.catch((error: unknown): ProviderResult => {
 		if (isAbortError(error)) throw error;
-		return { kind: "failure", provider, reason: { type: "invalid-response" } };
+		return { kind: "failure", provider, reason: { type: "invalid-response" }, ...account };
 	});
+}
+
+interface QuotaLookupOptions {
+	readonly signal: AbortSignal;
+	readonly account?: QuotaAccount;
+}
+
+/**
+ * One lookup per credential account of a provider that pools several, so each
+ * account reports its own limits and one account's failure never hides the
+ * others. A provider with a single account keeps the flat, unlabelled lookup.
+ */
+function providerLookups(
+	registry: QuotaModelRegistry,
+	provider: ProviderId,
+	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
+	signal: AbortSignal,
+): readonly Promise<ProviderResult>[] {
+	const accounts = listQuotaAccounts(registry, provider);
+	if (accounts.length === 0) {
+		return [guarded(fetchQuota({ signal }), provider, {})];
+	}
+	return accounts.map((account) =>
+		guarded(fetchQuota({ signal, account }), provider, accountFields(account)),
+	);
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -49,18 +81,22 @@ export default function (pi: ExtensionAPI): void {
 
 			ctx.ui.setStatus(STATUS_KEY, LOADING_STATUS);
 			try {
-				const [openai, anthropic] = await Promise.all([
-					guarded(
-						fetchOpenAiQuota(ctx.modelRegistry, { signal: controller.signal }),
+				const registry = ctx.modelRegistry;
+				const results = await Promise.all([
+					...providerLookups(
+						registry,
 						"openai-codex",
+						(options) => fetchOpenAiQuota(registry, options),
+						controller.signal,
 					),
-					guarded(
-						fetchAnthropicQuota(ctx.modelRegistry, { signal: controller.signal }),
+					...providerLookups(
+						registry,
 						"anthropic",
+						(options) => fetchAnthropicQuota(registry, options),
+						controller.signal,
 					),
 				]);
 				if (currentController !== controller) return;
-				const results = [openai, anthropic];
 				ctx.ui.notify(whiteText(formatQuotaResults(results)), notifySeverityForResults(results));
 			} catch {
 				// Only this invocation's own cancellation reaches here, which means a

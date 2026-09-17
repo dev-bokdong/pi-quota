@@ -113,6 +113,40 @@ function openAiOnlyRegistry(): QuotaModelRegistry {
 	};
 }
 
+interface PoolSlot {
+	readonly name: string;
+	readonly displayName?: string;
+}
+
+/**
+ * Host that pools credential accounts: `listSlots` enumerates them and
+ * slot-scoped `getAuth` hands out a token per account, which is exactly the
+ * boundary the command uses for a per-account lookup.
+ */
+function pooledRegistry(
+	slotsByProvider: Readonly<Record<string, readonly PoolSlot[]>>,
+	unresolvableAccounts: readonly string[] = [],
+): QuotaModelRegistry {
+	return {
+		...bothProvidersRegistry(),
+		authStorage: {
+			listSlots: (provider: string) => slotsByProvider[provider] ?? [],
+		},
+		modelRuntime: {
+			getAuth: async (_provider: unknown, overrides: unknown) => {
+				const slotName =
+					typeof overrides === "object" && overrides !== null
+						? Reflect.get(overrides, "slotName")
+						: undefined;
+				if (typeof slotName !== "string" || unresolvableAccounts.includes(slotName)) {
+					return undefined;
+				}
+				return { auth: { apiKey: `${SECRET_TOKEN}-${slotName}` } };
+			},
+		},
+	};
+}
+
 function noOAuthRegistry(): QuotaModelRegistry {
 	return {
 		getAvailable: () => [],
@@ -361,6 +395,76 @@ describe("quota command happy path", () => {
 		gate.release();
 		await pending;
 		expect(fake.notifyCalls).toHaveLength(1);
+	});
+});
+
+describe("quota command with pooled credential accounts", () => {
+	it("renders one labelled block per account and leaves a single account unlabelled", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({
+			registry: pooledRegistry({
+				"openai-codex": [{ name: "default" }, { name: "login-2", displayName: "work" }],
+				anthropic: [{ name: "default" }],
+			}),
+		});
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		expect(fake.notifyCalls).toHaveLength(1);
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("info");
+		expect(notification.message).toContain("[OpenAI: default]");
+		expect(notification.message).toContain("[OpenAI: work]");
+		expect(notification.message).toContain("[Anthropic]");
+		expect(notification.message).not.toContain("[Anthropic:");
+		expect(urls.filter((url) => url === OPENAI_URL)).toHaveLength(2);
+		expect(urls.filter((url) => url === ANTHROPIC_URL)).toHaveLength(1);
+		expectNoSecretLeak(fake);
+	});
+
+	it("keeps one account's quota when a sibling account resolves no credential", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({
+			registry: pooledRegistry(
+				{
+					"openai-codex": [{ name: "default" }, { name: "login-2", displayName: "work" }],
+					anthropic: [{ name: "default" }],
+				},
+				["login-2"],
+			),
+		});
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("warning");
+		expect(notification.message).toContain("[OpenAI: work]: not signed in with OAuth");
+		expect(notification.message).toContain("Five-hour");
+		expect(urls.filter((url) => url === OPENAI_URL)).toHaveLength(1);
+		expectNoSecretLeak(fake);
+	});
+
+	it("reads every account of one invocation concurrently", async () => {
+		const host = loadExtension();
+		const gate = stubGatedFetch();
+		const fake = fakeContext({
+			registry: pooledRegistry({
+				"openai-codex": [{ name: "default" }, { name: "login-2" }],
+				anthropic: [{ name: "default" }, { name: "login-2" }],
+			}),
+		});
+
+		const pending = quotaCommand(host).handler("", fake.ctx);
+		await gate.inFlight(4);
+
+		expect(gate.signals).toHaveLength(4);
+		gate.release();
+		await pending;
+
+		expect(fake.notifyCalls).toHaveLength(1);
+		expect(firstNotify(fake).type).toBe("info");
 	});
 });
 

@@ -1,8 +1,14 @@
 import { type QuotaModelRegistry, resolveOAuthCredentials } from "../auth.ts";
 import type { FetchLike } from "../http.ts";
 import { fetchJson, HttpNetworkError, HttpStatusError, HttpTimeoutError } from "../http.ts";
-import type { ProviderFailureReason, ProviderResult, QuotaWindow } from "../types.ts";
-import { clampPercent } from "../types.ts";
+import type {
+	AccountFields,
+	ProviderFailureReason,
+	ProviderResult,
+	QuotaAccount,
+	QuotaWindow,
+} from "../types.ts";
+import { accountFields, clampPercent } from "../types.ts";
 
 const PROVIDER_ID = "openai-codex" as const;
 const DISPLAY_NAME = "OpenAI";
@@ -23,6 +29,8 @@ export interface OpenAiQuotaOptions {
 	readonly signal?: AbortSignal;
 	readonly timeoutMs?: number;
 	readonly fetch?: FetchLike;
+	/** Reads this credential account instead of the provider's flat credential. */
+	readonly account?: QuotaAccount;
 }
 
 interface WindowValue {
@@ -154,10 +162,14 @@ async function resolveAccountId(accessToken: string): Promise<string | undefined
 	}
 }
 
-function failure(reason: ProviderFailureReason, retryAfterSeconds?: number): ProviderResult {
+function failure(
+	account: AccountFields,
+	reason: ProviderFailureReason,
+	retryAfterSeconds?: number,
+): ProviderResult {
 	return retryAfterSeconds === undefined
-		? { kind: "failure", provider: PROVIDER_ID, reason }
-		: { kind: "failure", provider: PROVIDER_ID, reason, retryAfterSeconds };
+		? { kind: "failure", provider: PROVIDER_ID, reason, ...account }
+		: { kind: "failure", provider: PROVIDER_ID, reason, retryAfterSeconds, ...account };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -165,16 +177,19 @@ function isAbortError(error: unknown): boolean {
 }
 
 /**
- * Reads the OpenAI Codex subscription quota. Never throws except to propagate
- * the caller's own cancellation; every other outcome is a ProviderResult.
+ * Reads the OpenAI Codex subscription quota of one credential account, or of
+ * the flat credential when no account is given. Never throws except to
+ * propagate the caller's own cancellation; every other outcome is a
+ * ProviderResult.
  */
 export async function fetchOpenAiQuota(
 	registry: QuotaModelRegistry,
 	options: OpenAiQuotaOptions = {},
 ): Promise<ProviderResult> {
-	const auth = await resolveOAuthCredentials(registry, PROVIDER_ID);
+	const account = accountFields(options.account);
+	const auth = await resolveOAuthCredentials(registry, PROVIDER_ID, options.account?.name);
 	if (!auth.ok) {
-		return { kind: "unavailable", provider: PROVIDER_ID, reason: auth.reason };
+		return { kind: "unavailable", provider: PROVIDER_ID, reason: auth.reason, ...account };
 	}
 
 	const accessToken = auth.credentials.accessToken;
@@ -191,23 +206,33 @@ export async function fetchOpenAiQuota(
 			...(options.fetch ? { fetch: options.fetch } : {}),
 		});
 	} catch (error) {
-		if (error instanceof HttpTimeoutError) return failure({ type: "timeout" });
-		if (error instanceof HttpNetworkError) return failure({ type: "network-error" });
+		if (error instanceof HttpTimeoutError) return failure(account, { type: "timeout" });
+		if (error instanceof HttpNetworkError) return failure(account, { type: "network-error" });
 		if (error instanceof HttpStatusError) {
-			return failure({ type: "http-error", status: error.status }, error.retryAfterSeconds);
+			return failure(
+				account,
+				{ type: "http-error", status: error.status },
+				error.retryAfterSeconds,
+			);
 		}
 		if (isAbortError(error)) throw error;
-		return failure({ type: "invalid-response" });
+		return failure(account, { type: "invalid-response" });
 	}
 
 	if (typeof usage !== "object" || usage === null) {
-		return failure({ type: "invalid-response" });
+		return failure(account, { type: "invalid-response" });
 	}
 
 	const windows = collectWindows(usage);
 	if (windows.length === 0) {
-		return { kind: "unavailable", provider: PROVIDER_ID, reason: "no-quota-windows" };
+		return { kind: "unavailable", provider: PROVIDER_ID, reason: "no-quota-windows", ...account };
 	}
 
-	return { kind: "success", provider: PROVIDER_ID, displayName: DISPLAY_NAME, windows };
+	return {
+		kind: "success",
+		provider: PROVIDER_ID,
+		displayName: DISPLAY_NAME,
+		windows,
+		...account,
+	};
 }

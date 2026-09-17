@@ -2,8 +2,8 @@ import type { QuotaModelRegistry } from "../auth.ts";
 import { resolveOAuthCredentials } from "../auth.ts";
 import type { FetchLike } from "../http.ts";
 import { fetchJson, HttpNetworkError, HttpStatusError, HttpTimeoutError } from "../http.ts";
-import type { ProviderResult, QuotaWindow } from "../types.ts";
-import { clampPercent } from "../types.ts";
+import type { AccountFields, ProviderResult, QuotaAccount, QuotaWindow } from "../types.ts";
+import { accountFields, clampPercent } from "../types.ts";
 
 const PROVIDER_ID = "anthropic" as const;
 const DISPLAY_NAME = "Anthropic";
@@ -14,6 +14,8 @@ export interface AnthropicQuotaOptions {
 	readonly signal?: AbortSignal;
 	readonly timeoutMs?: number;
 	readonly fetch?: FetchLike;
+	/** Reads this credential account instead of the provider's flat credential. */
+	readonly account?: QuotaAccount;
 }
 
 interface RawWindow {
@@ -55,21 +57,27 @@ function parseWindow(label: string, value: unknown): QuotaWindow | undefined {
 	return resetAt ? { label, remainingPercent, resetAt } : { label, remainingPercent };
 }
 
-function parseUsage(payload: unknown): ProviderResult {
+function parseUsage(payload: unknown, account: AccountFields): ProviderResult {
 	const root = asRecord<RawUsage>(payload);
 	if (!root) {
-		return { kind: "failure", provider: PROVIDER_ID, reason: { type: "invalid-response" } };
+		return {
+			kind: "failure",
+			provider: PROVIDER_ID,
+			reason: { type: "invalid-response" },
+			...account,
+		};
 	}
 	const fiveHour = parseWindow("Five-hour", root.five_hour ?? root.fiveHour);
 	const sevenDay = parseWindow("Weekly", root.seven_day ?? root.sevenDay);
 	if (!fiveHour || !sevenDay) {
-		return { kind: "unavailable", provider: PROVIDER_ID, reason: "no-quota-windows" };
+		return { kind: "unavailable", provider: PROVIDER_ID, reason: "no-quota-windows", ...account };
 	}
 	return {
 		kind: "success",
 		provider: PROVIDER_ID,
 		displayName: DISPLAY_NAME,
 		windows: [fiveHour, sevenDay],
+		...account,
 	};
 }
 
@@ -77,34 +85,46 @@ function isAbortError(error: unknown): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
-function toFailure(error: unknown): ProviderResult {
+function toFailure(error: unknown, account: AccountFields): ProviderResult {
 	if (error instanceof HttpTimeoutError) {
-		return { kind: "failure", provider: PROVIDER_ID, reason: { type: "timeout" } };
+		return { kind: "failure", provider: PROVIDER_ID, reason: { type: "timeout" }, ...account };
 	}
 	if (error instanceof HttpNetworkError) {
-		return { kind: "failure", provider: PROVIDER_ID, reason: { type: "network-error" } };
+		return {
+			kind: "failure",
+			provider: PROVIDER_ID,
+			reason: { type: "network-error" },
+			...account,
+		};
 	}
 	if (error instanceof HttpStatusError) {
 		const reason = { type: "http-error", status: error.status } as const;
 		return error.retryAfterSeconds === undefined
-			? { kind: "failure", provider: PROVIDER_ID, reason }
+			? { kind: "failure", provider: PROVIDER_ID, reason, ...account }
 			: {
 					kind: "failure",
 					provider: PROVIDER_ID,
 					reason,
 					retryAfterSeconds: error.retryAfterSeconds,
+					...account,
 				};
 	}
-	return { kind: "failure", provider: PROVIDER_ID, reason: { type: "invalid-response" } };
+	return {
+		kind: "failure",
+		provider: PROVIDER_ID,
+		reason: { type: "invalid-response" },
+		...account,
+	};
 }
 
 export async function fetchAnthropicQuota(
 	registry: QuotaModelRegistry,
 	options: AnthropicQuotaOptions = {},
 ): Promise<ProviderResult> {
-	const auth = await resolveOAuthCredentials(registry, PROVIDER_ID);
+	const account = accountFields(options.account);
+	const auth = await resolveOAuthCredentials(registry, PROVIDER_ID, options.account?.name);
 	if (!auth.ok) {
-		return { kind: "unavailable", provider: PROVIDER_ID, reason: auth.reason };
+		return { kind: "unavailable", provider: PROVIDER_ID, reason: auth.reason, ...account };
 	}
 
 	let payload: unknown;
@@ -122,8 +142,8 @@ export async function fetchAnthropicQuota(
 		if (isAbortError(error)) {
 			throw error;
 		}
-		return toFailure(error);
+		return toFailure(error, account);
 	}
 
-	return parseUsage(payload);
+	return parseUsage(payload, account);
 }

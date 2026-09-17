@@ -1,5 +1,23 @@
 export type ProviderId = "openai-codex" | "anthropic";
 
+/** One credential account of a provider that pools more than one. */
+export interface QuotaAccount {
+	/** Immutable slot identity used to resolve this account's credential. */
+	readonly name: string;
+	/** Label shown in the output: the account's display name when it has one. */
+	readonly label: string;
+}
+
+/**
+ * Account label carried by a provider result. It is absent for a provider read
+ * through its flat credential, which keeps single-account output unlabelled.
+ */
+export type AccountFields = { readonly account?: string };
+
+export function accountFields(account: QuotaAccount | undefined): AccountFields {
+	return account === undefined ? {} : { account: account.label };
+}
+
 export interface QuotaWindow {
 	readonly label: string;
 	readonly remainingPercent: number;
@@ -11,6 +29,7 @@ export interface ProviderSuccess {
 	readonly provider: ProviderId;
 	readonly displayName: string;
 	readonly windows: readonly QuotaWindow[];
+	readonly account?: string;
 }
 
 export type UnavailableReason =
@@ -22,6 +41,7 @@ export interface ProviderUnavailable {
 	readonly kind: "unavailable";
 	readonly provider: ProviderId;
 	readonly reason: UnavailableReason;
+	readonly account?: string;
 }
 
 export type ProviderFailureReason =
@@ -35,6 +55,7 @@ export interface ProviderFailure {
 	readonly provider: ProviderId;
 	readonly reason: ProviderFailureReason;
 	readonly retryAfterSeconds?: number;
+	readonly account?: string;
 }
 
 export type ProviderResult = ProviderSuccess | ProviderUnavailable | ProviderFailure;

@@ -496,3 +496,81 @@ describe("fetchOpenAiQuota", () => {
 		}
 	});
 });
+
+const ACCOUNT_TOKEN = "sk-test-account-canary-abc";
+const ACCOUNT = { name: "login-2", label: "work" } as const;
+
+/** Registry whose slot-scoped auth answers with a token of its own. */
+function accountRegistry(slotAuth?: (slotName: string) => unknown): QuotaModelRegistry {
+	return fakeRegistry({
+		modelRuntime: {
+			getAuth: async (_provider: unknown, overrides: unknown) => {
+				const slotName =
+					typeof overrides === "object" && overrides !== null
+						? Reflect.get(overrides, "slotName")
+						: undefined;
+				if (typeof slotName !== "string") return undefined;
+				if (slotAuth) return slotAuth(slotName);
+				return { auth: { apiKey: `${ACCOUNT_TOKEN}-${slotName}` } };
+			},
+		},
+	});
+}
+
+describe("fetchOpenAiQuota for one credential account", () => {
+	it("authenticates with that account's token and labels the result", async () => {
+		const { fetch, calls } = recordingFetch(
+			jsonResponse({
+				plan_type: "pro",
+				rate_limit: {
+					limit_reached: false,
+					primary_window: { used_percent: 18, limit_window_seconds: 18_000 },
+				},
+			}),
+		);
+
+		const result = await fetchOpenAiQuota(accountRegistry(), { fetch, account: ACCOUNT });
+
+		expect(result).toEqual({
+			kind: "success",
+			provider: "openai-codex",
+			displayName: "OpenAI",
+			account: "work",
+			windows: [{ label: "Five-hour", remainingPercent: 82 }],
+		});
+		expect(calls).toHaveLength(1);
+		expect((calls[0] as FetchCall).headers["Authorization"]).toBe(
+			`Bearer ${ACCOUNT_TOKEN}-login-2`,
+		);
+	});
+
+	it("labels an account that resolves no token and sends no request", async () => {
+		const { fetch, calls } = recordingFetch(jsonResponse({}));
+
+		const result = await fetchOpenAiQuota(
+			accountRegistry(() => undefined),
+			{ fetch, account: ACCOUNT },
+		);
+
+		expect(result).toEqual({
+			kind: "unavailable",
+			provider: "openai-codex",
+			reason: "oauth-not-configured",
+			account: "work",
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	it("labels a failed account lookup", async () => {
+		const { fetch } = recordingFetch(errorResponse(401));
+
+		const result = await fetchOpenAiQuota(accountRegistry(), { fetch, account: ACCOUNT });
+
+		expect(result).toEqual({
+			kind: "failure",
+			provider: "openai-codex",
+			reason: { type: "http-error", status: 401 },
+			account: "work",
+		});
+	});
+});

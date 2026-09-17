@@ -145,6 +145,54 @@ describe("formatQuotaResults", () => {
 		expect(formatQuotaResults([failure], now)).toBe("   [OpenAI]: request failed (HTTP 500)");
 	});
 
+	it("labels a provider block with its credential account", () => {
+		const labelled = {
+			...openAiSuccess,
+			account: "work",
+			windows: [{ label: "Weekly", remainingPercent: 61, resetAt: new Date(2026, 7, 10, 9) }],
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([labelled], now)).toBe(
+			[
+				"   [OpenAI: work]",
+				"     Weekly                 2d",
+				"     ███████████████░░░░░░░░░░ 61%",
+			].join("\n"),
+		);
+	});
+
+	it("renders one labelled block per account of the same provider", () => {
+		const first = { ...openAiSuccess, account: "default", windows: [] } as const;
+		const second = { ...openAiSuccess, account: "work", windows: [] } as const;
+
+		expect(formatQuotaResults([first, second], now)).toBe(
+			["   [OpenAI: default]", "", "   [OpenAI: work]"].join("\n"),
+		);
+	});
+
+	it("labels unavailable and failed accounts too", () => {
+		const unavailable = {
+			kind: "unavailable",
+			provider: "anthropic",
+			reason: "oauth-not-configured",
+			account: "login-2",
+		} as const satisfies ProviderResult;
+		const failure = {
+			kind: "failure",
+			provider: "openai-codex",
+			reason: { type: "http-error", status: 401 },
+			account: "work",
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([unavailable, failure], now)).toBe(
+			[
+				"   [Anthropic: login-2]: not signed in with OAuth",
+				"",
+				"   [OpenAI: work]: request failed (HTTP 401)",
+			].join("\n"),
+		);
+	});
+
 	it("does not throw for a successful result with empty windows", () => {
 		const emptySuccess = {
 			...openAiSuccess,
