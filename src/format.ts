@@ -1,5 +1,18 @@
-import type { ProviderFailure, ProviderResult, ProviderUnavailable, QuotaWindow } from "./types.ts";
+import type {
+	ProviderFailure,
+	ProviderId,
+	ProviderResult,
+	ProviderUnavailable,
+	QuotaWindow,
+} from "./types.ts";
 import { clampPercent } from "./types.ts";
+
+/** Provider names as the quota block shows them. */
+const DISPLAY_NAMES: Readonly<Record<ProviderId, string>> = {
+	"openai-codex": "OpenAI",
+	anthropic: "Anthropic",
+	"claude-sdk-oauth": "Claude SDK",
+};
 
 /**
  * The host dims info notifications with its own theme color, so the quota
@@ -28,7 +41,7 @@ function bracketed(name: string, account?: string): string {
 }
 
 function displayNameForProvider(result: ProviderUnavailable | ProviderFailure): string {
-	return bracketed(result.provider === "openai-codex" ? "OpenAI" : "Anthropic", result.account);
+	return bracketed(DISPLAY_NAMES[result.provider], result.account);
 }
 
 /**
@@ -72,6 +85,7 @@ function formatUnavailable(result: ProviderUnavailable): string {
 		"oauth-not-configured": "not signed in with OAuth",
 		"unsupported-auth-method":
 			"this account uses an API key, not OAuth - subscription quota isn't available",
+		"token-expired": "the stored token has expired - sign in again to refresh it",
 		"no-quota-windows": "no quota data in the response",
 	} as const;
 

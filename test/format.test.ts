@@ -193,6 +193,51 @@ describe("formatQuotaResults", () => {
 		);
 	});
 
+	it("names the Claude SDK OAuth lane in its own block", () => {
+		const claudeSuccess = {
+			kind: "success",
+			provider: "claude-sdk-oauth",
+			displayName: "Claude SDK",
+			windows: [{ label: "Five-hour", remainingPercent: 74, resetAt: new Date(2026, 7, 8, 7, 49) }],
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([anthropicSuccess, claudeSuccess], now)).toBe(
+			[
+				"   [Anthropic]",
+				"     Five-hour              1h",
+				"     ███████████████████░░░░░░ 74%",
+				"     Weekly                 2d",
+				"     ████████████░░░░░░░░░░░░░ 48%",
+				"",
+				"   [Claude SDK]",
+				"     Five-hour              1h",
+				"     ███████████████████░░░░░░ 74%",
+			].join("\n"),
+		);
+	});
+
+	it("labels Claude SDK OAuth accounts and explains an expired token", () => {
+		const expired = {
+			kind: "unavailable",
+			provider: "claude-sdk-oauth",
+			reason: "token-expired",
+			account: "work",
+		} as const satisfies ProviderResult;
+		const failure = {
+			kind: "failure",
+			provider: "claude-sdk-oauth",
+			reason: { type: "http-error", status: 401 },
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([expired, failure], now)).toBe(
+			[
+				"   [Claude SDK: work]: the stored token has expired - sign in again to refresh it",
+				"",
+				"   [Claude SDK]: request failed (HTTP 401)",
+			].join("\n"),
+		);
+	});
+
 	it("does not throw for a successful result with empty windows", () => {
 		const emptySuccess = {
 			...openAiSuccess,

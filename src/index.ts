@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@code-yeongyu/senpi";
 import type { QuotaModelRegistry } from "./auth.ts";
-import { listQuotaAccounts } from "./auth.ts";
+import { listClaudeSdkOauthAccounts, listQuotaAccounts } from "./auth.ts";
 import { formatQuotaResults, notifySeverityForResults, whiteText } from "./format.ts";
 import { fetchAnthropicQuota } from "./providers/anthropic.ts";
+import { fetchClaudeSdkOauthQuota } from "./providers/claude-sdk-oauth.ts";
 import { fetchOpenAiQuota } from "./providers/openai.ts";
 import type { AccountFields, ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
 import { accountFields } from "./types.ts";
@@ -11,7 +12,7 @@ const STATUS_KEY = "pi-quota";
 const LOADING_STATUS = "Loading quota...";
 const USAGE_MESSAGE = "/quota takes no arguments. Run /quota on its own to read your quota.";
 const SCOPE_MESSAGE = "/quota is available in interactive mode only. No quota request was made.";
-const COMMAND_DESCRIPTION = "Show OpenAI Codex and Anthropic subscription quota";
+const COMMAND_DESCRIPTION = "Show OpenAI Codex, Anthropic and Claude SDK subscription quota";
 
 function isAbortError(error: unknown): boolean {
 	return error instanceof Error && error.name === "AbortError";
@@ -42,20 +43,39 @@ interface QuotaLookupOptions {
 /**
  * One lookup per credential account of a provider that pools several, so each
  * account reports its own limits and one account's failure never hides the
- * others. A provider with a single account keeps the flat, unlabelled lookup.
+ * others. A provider with at most one account keeps the single, unlabelled
+ * lookup.
  */
 function providerLookups(
-	registry: QuotaModelRegistry,
 	provider: ProviderId,
+	accounts: readonly QuotaAccount[],
 	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
 	signal: AbortSignal,
 ): readonly Promise<ProviderResult>[] {
-	const accounts = listQuotaAccounts(registry, provider);
-	if (accounts.length === 0) {
+	if (accounts.length < 2) {
 		return [guarded(fetchQuota({ signal }), provider, {})];
 	}
 	return accounts.map((account) =>
 		guarded(fetchQuota({ signal, account }), provider, accountFields(account)),
+	);
+}
+
+/**
+ * Claude SDK OAuth is an opt-in lane with its own accounts, so a session that
+ * never signed into it is not told the lane is missing - the lane is simply not
+ * part of the answer.
+ */
+function claudeSdkOauthLookups(
+	registry: QuotaModelRegistry,
+	signal: AbortSignal,
+): readonly Promise<ProviderResult>[] {
+	const accounts = listClaudeSdkOauthAccounts(registry);
+	if (accounts.length === 0) return [];
+	return providerLookups(
+		"claude-sdk-oauth",
+		accounts,
+		(options) => fetchClaudeSdkOauthQuota(registry, options),
+		signal,
 	);
 }
 
@@ -84,17 +104,18 @@ export default function (pi: ExtensionAPI): void {
 				const registry = ctx.modelRegistry;
 				const results = await Promise.all([
 					...providerLookups(
-						registry,
 						"openai-codex",
+						listQuotaAccounts(registry, "openai-codex"),
 						(options) => fetchOpenAiQuota(registry, options),
 						controller.signal,
 					),
 					...providerLookups(
-						registry,
 						"anthropic",
+						listQuotaAccounts(registry, "anthropic"),
 						(options) => fetchAnthropicQuota(registry, options),
 						controller.signal,
 					),
+					...claudeSdkOauthLookups(registry, controller.signal),
 				]);
 				if (currentController !== controller) return;
 				ctx.ui.notify(whiteText(formatQuotaResults(results)), notifySeverityForResults(results));

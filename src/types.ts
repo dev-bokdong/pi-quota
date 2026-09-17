@@ -1,4 +1,4 @@
-export type ProviderId = "openai-codex" | "anthropic";
+export type ProviderId = "openai-codex" | "anthropic" | "claude-sdk-oauth";
 
 /** One credential account of a provider that pools more than one. */
 export interface QuotaAccount {
@@ -35,6 +35,7 @@ export interface ProviderSuccess {
 export type UnavailableReason =
 	| "oauth-not-configured"
 	| "unsupported-auth-method"
+	| "token-expired"
 	| "no-quota-windows";
 
 export interface ProviderUnavailable {

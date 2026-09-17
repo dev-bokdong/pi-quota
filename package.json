@@ -1,7 +1,7 @@
 {
 	"name": "pi-quota",
 	"version": "0.1.0",
-	"description": "OpenAI Codex and Anthropic subscription quota lookup for Senpi. Adds a local /quota command that reuses Senpi-managed OAuth credentials.",
+	"description": "OpenAI Codex, Anthropic and Claude SDK OAuth subscription quota lookup for Senpi. Adds a local /quota command that reuses Senpi-managed OAuth credentials.",
 	"type": "module",
 	"license": "MIT",
 	"author": "\uBCF5\uB35D <bokdong9417@gmail.com>",

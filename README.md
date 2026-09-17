@@ -5,12 +5,14 @@
 프로젝트입니다.
 
 원본의 전체 기능을 복제하지 않습니다. Senpi 안에서 자주 쓰는 `/quota` 명령 하나와
-OpenAI Codex·Anthropic 사용량 조회에 집중합니다.
+OpenAI Codex·Anthropic·Claude SDK OAuth 사용량 조회에 집중합니다.
 
 ## 기능
 
 - Senpi 대화형 모드에서 `/quota` 명령 제공
 - OpenAI Codex 5시간·주간·월간·코드 리뷰 한도와 Anthropic 5시간·주간 한도 표시
+- `claude-sdk-oauth`(Claude Agent SDK) 레인에 로그인해 두었으면 그 계정의 Claude
+  구독 한도도 함께 표시 (로그인하지 않았으면 해당 블록은 아예 나오지 않음)
 - 같은 제공자에 계정이 여러 개 등록되어 있으면 계정별로 한도를 각각 표시
 - Senpi가 이미 관리하는 OAuth 인증 정보를 그대로 재사용 (별도 로그인 절차 없음)
 - 결과는 알림(notify)으로만 표시 — 모델 턴을 시작하거나 대화 컨텍스트를 소비하지
@@ -26,8 +28,9 @@ OpenAI Codex·Anthropic 사용량 조회에 집중합니다.
 | 운영체제 | Linux, Windows (macOS는 지원하나 미검증) |
 | OpenAI 인증 | `openai-codex` OAuth (Codex 구독) |
 | Anthropic 인증 | `anthropic` OAuth (Claude 구독) |
-| 멀티 계정 | 두 제공자 모두 계정별 조회 (`/account`, `/gpt-account`로 관리하는 계정) |
-| `claude-sdk-oauth` 레인 | 범위 밖 (`/claude-account` 계정은 조회하지 않음) |
+| Claude SDK 인증 | `claude-sdk-oauth` OAuth (`/login claude-sdk-oauth` 계정, `CLAUDE_CODE_OAUTH_TOKEN[_N]` 포함) |
+| 멀티 계정 | 세 제공자 모두 계정별 조회 (`/account`, `/gpt-account`, `/claude-account`로 관리하는 계정) |
+| Claude SDK ambient 레인 | 범위 밖 (호스트 Claude CLI가 직접 보관하는 토큰은 읽지 않음) |
 | API 키 인증 | 지원 안 함 — 아래 [인증](#인증) 참고 |
 | 기타 opencode-quota 제공자 | 범위 밖 |
 | 독립 실행형 CLI | 범위 밖 |
@@ -79,7 +82,16 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
      ████████████████████░░░░░ 78%
      Weekly                 2d
      ███████████████████░░░░░░ 74%
+
+   [Claude SDK]
+     Five-hour            2.5h
+     ██████████████████░░░░░░░ 71%
+     Weekly                 2d
+     ████████████████░░░░░░░░░ 63%
 ```
+
+`[Claude SDK]` 블록은 `claude-sdk-oauth` 레인에 계정이 하나라도 등록되어 있을 때만
+나타납니다. 이 레인을 쓰지 않는 세션의 출력은 이전과 동일합니다.
 
 한 제공자에 계정이 둘 이상 등록되어 있으면 계정마다 블록이 하나씩 나오고 헤더에
 계정 이름이 붙습니다. 이름은 `/account <provider> rename`으로 지정한 표시 이름이
@@ -109,7 +121,7 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 ## 인증
 
 `/quota`는 별도의 로그인 절차나 토큰 설정을 요구하지 않습니다. Senpi에 이미
-로그인되어 있는 OpenAI Codex 또는 Anthropic 계정의 OAuth 자격 증명을 그대로
+로그인되어 있는 OpenAI Codex·Anthropic·Claude SDK OAuth 계정의 자격 증명을 그대로
 읽어 사용합니다.
 
 - 아직 로그인하지 않았다면 Senpi에서 해당 제공자로 평소 로그인 절차(OAuth)를
@@ -129,10 +141,24 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
      [OpenAI]: not signed in with OAuth
   ```
 
+- `claude-sdk-oauth` 계정은 토큰을 호스트 인증 경로로 받을 수 없습니다. 이 레인은
+  실제 요청을 Claude Agent SDK 하위 프로세스가 보내기 때문에 호스트가 이 제공자의
+  인증을 토큰이 아닌 `claude-sdk-oauth-managed` 표식으로 해석합니다. 따라서 각
+  계정의 토큰은 그 계정의 자격 증명 슬롯(`listSlots`가 돌려주는 `access`)에서
+  직접 읽고, 표식이 들어 있는 슬롯은 무시합니다.
+- 저장된 `claude-sdk-oauth` 토큰이 이미 만료되었으면 갱신하지 않고 그대로 보고합니다.
+  리프레시 토큰은 회전되기 때문에, 자격 증명을 소유한 레인 외에는 갱신해서는 안
+  됩니다(다른 곳에서 갱신하면 그 계정 로그인이 깨집니다).
+
+  ```text
+     [Claude SDK]: the stored token has expired - sign in again to refresh it
+  ```
+
 - 계정이 여러 개인 제공자는 계정별로 토큰을 따로 해석합니다. 계정 목록은
-  `ctx.modelRegistry.authStorage.listSlots(provider)`로 읽고, 각 계정의 토큰은
-  호스트의 계정 단위 인증(`modelRuntime.getAuth(provider, { slotName })`)으로
-  받습니다. 이 경로는 해당 계정의 토큰만 갱신하며 다른 계정으로 폴백하지 않으므로,
+  `ctx.modelRegistry.authStorage.listSlots(provider)`로 읽고, `openai-codex`·
+  `anthropic` 계정의 토큰은 호스트의 계정 단위
+  인증(`modelRuntime.getAuth(provider, { slotName })`)으로 받습니다. 이 경로는
+  해당 계정의 토큰만 갱신하며 다른 계정으로 폴백하지 않으므로,
   한 계정의 한도가 다른 계정 이름으로 표시되는 일은 없습니다. 한 계정이 실패해도
   나머지 계정 결과는 그대로 표시됩니다.
 - 계정 풀을 지원하지 않는 구버전 호스트에서는 두 멤버가 없으므로 기존처럼 제공자당
@@ -148,7 +174,7 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 
 1. OpenCode API 대신 Senpi 확장 API를 사용합니다.
 2. `/quota` 명령 하나만 제공합니다.
-3. OpenAI Codex와 Anthropic OAuth 인증만 다룹니다.
+3. OpenAI Codex·Anthropic·Claude SDK OAuth 인증만 다룹니다.
 4. Linux와 Windows에서 동작을 검증했습니다. macOS는 플랫폼 의존 코드가 없어
    지원 대상이지만 실기기 검증은 하지 않았습니다.
 
@@ -157,6 +183,10 @@ Senpi를 실행하고 대화형 모드에서 다음 명령을 입력합니다.
 구현이 완료되었습니다. `/quota` 등록, OpenAI·Anthropic 조회, 부분 성공/실패
 처리, 취소·중복 실행 처리까지 자동 테스트와 실제 Senpi 세션에서의 사용량 조회로
 확인했습니다.
+
+`claude-sdk-oauth` 레인은 자동 테스트와 실제 호스트 `AuthStorage.listSlots` 슬롯
+읽기 검증까지 마쳤습니다. 실제 `claude-sdk-oauth` 로그인 세션에서의 라이브 조회는
+아직 검증하지 않았습니다.
 
 ```bash
 bun run check   # 타입체크 + lint

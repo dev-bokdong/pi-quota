@@ -4,7 +4,7 @@ import type {
 	ExtensionContext,
 	SessionShutdownEvent,
 } from "@code-yeongyu/senpi";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QuotaModelRegistry } from "../src/auth.ts";
 import type { HttpResponseLike } from "../src/http.ts";
 import registerQuotaExtension from "../src/index.ts";
@@ -320,15 +320,53 @@ function expectNoSecretLeak(fake: FakeContext): void {
 	}
 }
 
+const CLAUDE_TOKEN = "sk-ant-oat-claude-command-canary-should-never-leak";
+
+const CLAUDE_ENV_NAMES: readonly string[] = [
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	...Array.from({ length: 15 }, (_unused, index) => `CLAUDE_CODE_OAUTH_TOKEN_${index + 2}`),
+];
+
+interface ClaudeSlot {
+	readonly name: string;
+	readonly displayName?: string;
+	readonly access: string;
+	readonly expires?: number;
+}
+
+/**
+ * Host whose Claude SDK OAuth credential pools the given accounts. Its auth
+ * resolution stays on the marker the real host projects for that provider, so
+ * the lane's tokens can only come from the slots themselves.
+ */
+function claudeLaneRegistry(slots: readonly ClaudeSlot[]): QuotaModelRegistry {
+	return {
+		...bothProvidersRegistry(),
+		authStorage: {
+			listSlots: (provider: string) => (provider === "claude-sdk-oauth" ? slots : []),
+		},
+	};
+}
+
 const REAL_PLATFORM = process.platform;
 
 function setPlatform(value: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", { value, configurable: true });
 }
 
+/**
+ * The Claude SDK OAuth lane reads these variables, so a token that happens to
+ * be exported on the machine running the tests must not add an account to the
+ * expected output.
+ */
+beforeEach(() => {
+	for (const name of CLAUDE_ENV_NAMES) vi.stubEnv(name, undefined);
+});
+
 afterEach(() => {
 	setPlatform(REAL_PLATFORM);
 	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
 });
 
 describe("quota extension registration", () => {
@@ -840,5 +878,99 @@ describe("quota command credential safety", () => {
 			expectNoSecretLeak(fake);
 			vi.unstubAllGlobals();
 		}
+	});
+});
+
+describe("quota command with the Claude SDK OAuth lane", () => {
+	it("omits the lane entirely when no Claude SDK account is configured", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({ registry: bothProvidersRegistry() });
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("info");
+		expect(notification.message).not.toContain("Claude SDK");
+		expect(urls).toHaveLength(2);
+	});
+
+	it("renders a single Claude SDK account unlabelled", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({
+			registry: claudeLaneRegistry([
+				{ name: "default", access: CLAUDE_TOKEN, expires: Date.now() + 3_600_000 },
+			]),
+		});
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		expect(fake.notifyCalls).toHaveLength(1);
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("info");
+		expect(notification.message).toContain("[Claude SDK]");
+		expect(notification.message).not.toContain("[Claude SDK:");
+		expect(urls.filter((url) => url === ANTHROPIC_URL)).toHaveLength(2);
+		expect(urls.filter((url) => url === OPENAI_URL)).toHaveLength(1);
+		expect(notification.message).not.toContain(CLAUDE_TOKEN);
+	});
+
+	it("renders one labelled block per Claude SDK account", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({
+			registry: claudeLaneRegistry([
+				{ name: "default", access: `${CLAUDE_TOKEN}-1`, expires: Date.now() + 3_600_000 },
+				{
+					name: "login-2",
+					displayName: "work",
+					access: `${CLAUDE_TOKEN}-2`,
+					expires: Date.now() + 3_600_000,
+				},
+			]),
+		});
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("info");
+		expect(notification.message).toContain("[Claude SDK: default]");
+		expect(notification.message).toContain("[Claude SDK: work]");
+		expect(urls.filter((url) => url === ANTHROPIC_URL)).toHaveLength(3);
+		expect(notification.message).not.toContain(CLAUDE_TOKEN);
+	});
+
+	it("explains an expired Claude SDK token without calling the usage API for it", async () => {
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({
+			registry: claudeLaneRegistry([
+				{ name: "default", access: CLAUDE_TOKEN, expires: Date.now() - 1000 },
+			]),
+		});
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("warning");
+		expect(notification.message).toContain("[Claude SDK]: the stored token has expired");
+		expect(urls.filter((url) => url === ANTHROPIC_URL)).toHaveLength(1);
+		expect(notification.message).not.toContain(CLAUDE_TOKEN);
+	});
+
+	it("reads a Claude SDK account provided through the environment", async () => {
+		vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", CLAUDE_TOKEN);
+		const host = loadExtension();
+		const { urls } = stubSuccessFetch();
+		const fake = fakeContext({ registry: bothProvidersRegistry() });
+
+		await quotaCommand(host).handler("", fake.ctx);
+
+		const notification = firstNotify(fake);
+		expect(notification.type).toBe("info");
+		expect(notification.message).toContain("[Claude SDK]");
+		expect(urls.filter((url) => url === ANTHROPIC_URL)).toHaveLength(2);
+		expect(notification.message).not.toContain(CLAUDE_TOKEN);
 	});
 });

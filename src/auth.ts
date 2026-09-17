@@ -33,6 +33,34 @@ export type AuthResolution =
 
 const NOT_CONFIGURED: AuthResolution = { ok: false, reason: "oauth-not-configured" };
 const UNSUPPORTED_AUTH: AuthResolution = { ok: false, reason: "unsupported-auth-method" };
+const TOKEN_EXPIRED: AuthResolution = { ok: false, reason: "token-expired" };
+
+const CLAUDE_SDK_OAUTH_PROVIDER = "claude-sdk-oauth" as const;
+
+/**
+ * Marker the host projects onto the Claude SDK OAuth flat credential in place
+ * of a token: the real material lives in each account's credential slot, and
+ * the marker itself can never authenticate a request.
+ */
+const CLAUDE_SDK_OAUTH_SENTINEL = "claude-sdk-oauth-managed";
+
+/**
+ * Read-only Claude Code tokens the host accepts from the environment, under the
+ * account names it gives them, so an env-configured account is named in the
+ * output exactly as `/claude-account` names it.
+ */
+const ENV_TOKEN_SLOTS: readonly { readonly variable: string; readonly name: string }[] = [
+	{ variable: "CLAUDE_CODE_OAUTH_TOKEN", name: "env" },
+	...Array.from({ length: 15 }, (_unused, index) => ({
+		variable: `CLAUDE_CODE_OAUTH_TOKEN_${index + 2}`,
+		name: `env-${index + 2}`,
+	})),
+];
+
+/** Reads one environment variable; the default reads this process's own. */
+export type EnvReader = (name: string) => string | undefined;
+
+const processEnv: EnvReader = (name) => process.env[name];
 
 type HostCall = (...args: readonly unknown[]) => unknown;
 
@@ -66,6 +94,16 @@ export function listQuotaAccounts(
 	registry: QuotaModelRegistry,
 	providerId: ProviderId,
 ): readonly QuotaAccount[] {
+	const accounts: QuotaAccount[] = [];
+	for (const slot of storedSlots(registry, providerId)) {
+		const account = toAccount(slot);
+		if (account) accounts.push(account);
+	}
+	return accounts.length > 1 ? accounts : [];
+}
+
+/** Reads the provider's stored credential slots on a host that pools them. */
+function storedSlots(registry: QuotaModelRegistry, providerId: ProviderId): readonly unknown[] {
 	const listSlots = hostCall(registry.authStorage, "listSlots");
 	if (!listSlots) return [];
 
@@ -75,14 +113,101 @@ export function listQuotaAccounts(
 	} catch {
 		return [];
 	}
-	if (!Array.isArray(slots)) return [];
+	return Array.isArray(slots) ? slots : [];
+}
 
-	const accounts: QuotaAccount[] = [];
-	for (const slot of slots) {
-		const account = toAccount(slot);
-		if (account) accounts.push(account);
+/** One Claude SDK OAuth account together with the token stored for it. */
+interface ClaudeSdkOauthSlot {
+	readonly account: QuotaAccount;
+	readonly accessToken: string;
+	/** Epoch milliseconds, absent when the account's source reports no expiry. */
+	readonly expiresAt?: number;
+}
+
+function toClaudeSdkOauthSlot(slot: unknown): ClaudeSdkOauthSlot | undefined {
+	const account = toAccount(slot);
+	if (!account) return undefined;
+
+	const access = readProperty(slot, "access");
+	if (typeof access !== "string" || access.length === 0 || access === CLAUDE_SDK_OAUTH_SENTINEL) {
+		return undefined;
 	}
-	return accounts.length > 1 ? accounts : [];
+
+	const expires = readProperty(slot, "expires");
+	return typeof expires === "number" && Number.isFinite(expires) && expires > 0
+		? { account, accessToken: access, expiresAt: expires }
+		: { account, accessToken: access };
+}
+
+/**
+ * Collects the Claude SDK OAuth accounts that hold a usable token: the stored
+ * credential slots first, then the environment tokens the host also accepts. A
+ * stored account wins over an environment account of the same name, which is
+ * the precedence the host's own account listing applies.
+ */
+function claudeSdkOauthSlots(
+	registry: QuotaModelRegistry,
+	env: EnvReader,
+): readonly ClaudeSdkOauthSlot[] {
+	const slots: ClaudeSdkOauthSlot[] = [];
+	for (const raw of storedSlots(registry, CLAUDE_SDK_OAUTH_PROVIDER)) {
+		const slot = toClaudeSdkOauthSlot(raw);
+		if (slot && !slots.some((existing) => existing.account.name === slot.account.name)) {
+			slots.push(slot);
+		}
+	}
+
+	for (const { variable, name } of ENV_TOKEN_SLOTS) {
+		let token: unknown;
+		try {
+			token = env(variable);
+		} catch {
+			continue;
+		}
+		if (typeof token !== "string" || token.length === 0) continue;
+		if (slots.some((existing) => existing.account.name === name)) continue;
+		slots.push({ account: { name, label: name }, accessToken: token });
+	}
+
+	return slots;
+}
+
+/**
+ * Lists every Claude SDK OAuth account that holds a readable token, including
+ * the only one when the lane has just one. An empty list means the lane is not
+ * configured at all, which is what keeps this opt-in provider out of the
+ * output of a session that never signed into it.
+ */
+export function listClaudeSdkOauthAccounts(
+	registry: QuotaModelRegistry,
+	env: EnvReader = processEnv,
+): readonly QuotaAccount[] {
+	return claudeSdkOauthSlots(registry, env).map((slot) => slot.account);
+}
+
+/**
+ * Reads one Claude SDK OAuth account's access token, or the only account's when
+ * no name is given. The host resolves this provider's auth to a managed marker
+ * rather than a token — the SDK subprocess owns the request, not senpi — so the
+ * token is read from the account's own credential slot instead.
+ *
+ * An expired stored token is reported as such rather than sent: only the lane
+ * that owns the credential may refresh it, and a rotated refresh token written
+ * by anyone else would invalidate the account.
+ */
+export function resolveClaudeSdkOauthCredentials(
+	registry: QuotaModelRegistry,
+	accountName?: string,
+	env: EnvReader = processEnv,
+): AuthResolution {
+	const slots = claudeSdkOauthSlots(registry, env);
+	const slot =
+		accountName === undefined
+			? slots[0]
+			: slots.find((candidate) => candidate.account.name === accountName);
+	if (!slot) return NOT_CONFIGURED;
+	if (slot.expiresAt !== undefined && slot.expiresAt <= Date.now()) return TOKEN_EXPIRED;
+	return { ok: true, credentials: { accessToken: slot.accessToken } };
 }
 
 async function flatAccessToken(
