@@ -143,6 +143,32 @@ describe("resolveOAuthCredentials for one account", () => {
 		expect(result).toEqual({ ok: false, reason: "oauth-not-configured" });
 	});
 
+	it("reads the sole pooled account through the flat credential without slot-scoped auth", async () => {
+		const registry = fakeRegistry({
+			getAvailable: () => [{ provider: "openai-codex" }],
+			isUsingOAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: SECRET_TOKEN }),
+			authStorage: { listSlots: () => [{ name: "default" }] },
+		});
+
+		const result = await resolveOAuthCredentials(registry, "openai-codex", "default");
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: SECRET_TOKEN } });
+	});
+
+	it("refuses the flat credential for a pool of several accounts without slot-scoped auth", async () => {
+		const registry = fakeRegistry({
+			getAvailable: () => [{ provider: "openai-codex" }],
+			isUsingOAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: SECRET_TOKEN }),
+			authStorage: { listSlots: () => [{ name: "default" }, { name: "login-2" }] },
+		});
+
+		const result = await resolveOAuthCredentials(registry, "openai-codex", "default");
+
+		expect(result).toEqual({ ok: false, reason: "oauth-not-configured" });
+	});
+
 	it("reports unsupported-auth-method for an API-key provider before reading accounts", async () => {
 		const calls: SlotAuthCall[] = [];
 		const registry = fakeRegistry({

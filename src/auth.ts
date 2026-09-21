@@ -64,12 +64,12 @@ const processEnv: EnvReader = (name) => process.env[name];
 
 type HostCall = (...args: readonly unknown[]) => unknown;
 
-function readProperty(value: unknown, key: string): unknown {
+export function readProperty(value: unknown, key: string): unknown {
 	return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
 }
 
 /** Binds one host method, or reports its absence on an older host. */
-function hostCall(host: unknown, name: string): HostCall | undefined {
+export function hostCall(host: unknown, name: string): HostCall | undefined {
 	const value = readProperty(host, name);
 	return typeof value === "function" ? (value.bind(host) as HostCall) : undefined;
 }
@@ -93,13 +93,14 @@ function toAccount(slot: unknown): QuotaAccount | undefined {
 export function listQuotaAccounts(
 	registry: QuotaModelRegistry,
 	providerId: ProviderId,
+	includeSingle = false,
 ): readonly QuotaAccount[] {
 	const accounts: QuotaAccount[] = [];
 	for (const slot of storedSlots(registry, providerId)) {
 		const account = toAccount(slot);
 		if (account) accounts.push(account);
 	}
-	return accounts.length > 1 ? accounts : [];
+	return includeSingle || accounts.length > 1 ? accounts : [];
 }
 
 /** Reads the provider's stored credential slots on a host that pools them. */
@@ -226,11 +227,20 @@ async function flatAccessToken(
  */
 async function accountAccessToken(
 	registry: QuotaModelRegistry,
+	model: QuotaAuthModel,
 	providerId: ProviderId,
 	accountName: string,
 ): Promise<string | undefined> {
 	const getAuth = hostCall(registry.modelRuntime, "getAuth");
-	if (!getAuth) return undefined;
+	if (!getAuth) {
+		// A host that pools credentials without slot-scoped auth can only speak for
+		// its single account; with several, the flat credential could answer under
+		// the wrong account's label.
+		const accounts = listQuotaAccounts(registry, providerId, true);
+		return accounts.length === 1 && accounts[0]?.name === accountName
+			? await flatAccessToken(registry, model)
+			: undefined;
+	}
 	const resolved = await getAuth(providerId, { slotName: accountName });
 	const apiKey = readProperty(readProperty(resolved, "auth"), "apiKey");
 	return typeof apiKey === "string" && apiKey.length > 0 ? apiKey : undefined;
@@ -256,7 +266,7 @@ export async function resolveOAuthCredentials(
 		const accessToken =
 			accountName === undefined
 				? await flatAccessToken(registry, model)
-				: await accountAccessToken(registry, providerId, accountName);
+				: await accountAccessToken(registry, model, providerId, accountName);
 		if (accessToken === undefined) {
 			return NOT_CONFIGURED;
 		}

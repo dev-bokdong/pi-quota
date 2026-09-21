@@ -5,6 +5,8 @@ import { formatQuotaResults, notifySeverityForResults, whiteText } from "./forma
 import { fetchAnthropicQuota } from "./providers/anthropic.ts";
 import { fetchClaudeSdkOauthQuota } from "./providers/claude-sdk-oauth.ts";
 import { fetchOpenAiQuota } from "./providers/openai.ts";
+import type { QuotaRecovery } from "./recovery.ts";
+import { prepareQuotaRecovery } from "./recovery.ts";
 import type { AccountFields, ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
 import { accountFields } from "./types.ts";
 
@@ -52,11 +54,15 @@ function providerLookups(
 	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
 	signal: AbortSignal,
 ): readonly Promise<ProviderResult>[] {
-	if (accounts.length < 2) {
+	if (accounts.length === 0) {
 		return [guarded(fetchQuota({ signal }), provider, {})];
 	}
 	return accounts.map((account) =>
-		guarded(fetchQuota({ signal, account }), provider, accountFields(account)),
+		guarded(fetchQuota({ signal, account }), provider, accountFields(account)).then((result) => {
+			if (accounts.length > 1) return result;
+			const { account: _label, ...unlabelled } = result;
+			return unlabelled;
+		}),
 	);
 }
 
@@ -68,18 +74,14 @@ function providerLookups(
 function claudeSdkOauthLookups(
 	registry: QuotaModelRegistry,
 	signal: AbortSignal,
+	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
 ): readonly Promise<ProviderResult>[] {
 	const accounts = listClaudeSdkOauthAccounts(registry);
 	if (accounts.length === 0) return [];
-	return providerLookups(
-		"claude-sdk-oauth",
-		accounts,
-		(options) => fetchClaudeSdkOauthQuota(registry, options),
-		signal,
-	);
+	return providerLookups("claude-sdk-oauth", accounts, fetchQuota, signal);
 }
 
-export default function(pi: ExtensionAPI): void {
+export default function (pi: ExtensionAPI): void {
 	let currentController: AbortController | undefined;
 
 	pi.registerCommand("quota", {
@@ -102,21 +104,57 @@ export default function(pi: ExtensionAPI): void {
 			ctx.ui.setStatus(STATUS_KEY, LOADING_STATUS);
 			try {
 				const registry = ctx.modelRegistry;
+				const recoveries: Array<() => Promise<void>> = [];
+				let recoveryFailed = false;
+				const withRecovery =
+					(
+						provider: ProviderId,
+						fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
+					) =>
+					async (options: QuotaLookupOptions): Promise<ProviderResult> => {
+						// Persistence is best-effort; errors must never hide the quota.
+						let recover: QuotaRecovery | undefined;
+						try {
+							recover = await prepareQuotaRecovery(registry, provider, options.account);
+						} catch {
+							recoveryFailed = true;
+						}
+						const result = await fetchQuota(options);
+						if (recover) {
+							const apply = recover;
+							recoveries.push(() => apply(result, controller.signal));
+						}
+						return result;
+					};
 				const results = await Promise.all([
 					...providerLookups(
 						"openai-codex",
-						listQuotaAccounts(registry, "openai-codex"),
-						(options) => fetchOpenAiQuota(registry, options),
+						listQuotaAccounts(registry, "openai-codex", true),
+						withRecovery("openai-codex", (options) => fetchOpenAiQuota(registry, options)),
 						controller.signal,
 					),
 					...providerLookups(
 						"anthropic",
-						listQuotaAccounts(registry, "anthropic"),
-						(options) => fetchAnthropicQuota(registry, options),
+						listQuotaAccounts(registry, "anthropic", true),
+						withRecovery("anthropic", (options) => fetchAnthropicQuota(registry, options)),
 						controller.signal,
 					),
-					...claudeSdkOauthLookups(registry, controller.signal),
+					...claudeSdkOauthLookups(
+						registry,
+						controller.signal,
+						withRecovery("claude-sdk-oauth", (options) =>
+							fetchClaudeSdkOauthQuota(registry, options),
+						),
+					),
 				]);
+				if (currentController !== controller) return;
+				for (const recover of recoveries) {
+					try {
+						await recover();
+					} catch {
+						recoveryFailed = true;
+					}
+				}
 				if (currentController !== controller) return;
 				// A provider holding no OAuth is not part of the answer, so an
 				// invocation that could read nothing has nothing to say and stays
@@ -124,6 +162,12 @@ export default function(pi: ExtensionAPI): void {
 				const block = formatQuotaResults(results);
 				if (block !== "") {
 					ctx.ui.notify(whiteText(block), notifySeverityForResults(results));
+				}
+				if (recoveryFailed) {
+					ctx.ui.notify(
+						"Could not clear quota rate-limit blocks. Quota results are unchanged.",
+						"warning",
+					);
 				}
 			} catch {
 				// Only this invocation's own cancellation reaches here, which means a
