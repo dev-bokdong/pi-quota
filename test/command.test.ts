@@ -278,8 +278,8 @@ function stubGatedFetch(): GatedFetch {
 			started >= count
 				? Promise.resolve()
 				: new Promise<void>((resolve) => {
-					waiters.push({ count, resolve });
-				}),
+						waiters.push({ count, resolve });
+					}),
 		release: () => {
 			released = true;
 			for (const settle of pendingSettles.splice(0)) settle();
