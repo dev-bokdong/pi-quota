@@ -191,14 +191,17 @@ export async function prepareQuotaRecovery(
 					)
 						return latest;
 					matched = true;
-					// The host owns the shape of a sidecar entry, so one is never invented here.
-					if (!latestState) return latest;
 					if (intent.kind === "block") {
-						const { lease: _lease, ...held } = latestState;
+						// A provider whose pool lane was never written has no entry, and the
+						// generic pool reads blocks from the sidecar only, so one is created
+						// here. Its credentialRevision is mandatory: the pool applies an entry
+						// only while that revision still matches the credential it lists.
+						const { lease: _lease, ...held } = latestState ?? { credentialRevision: revision };
 						reconciled = true;
 						return withRateLimit(held, intent.until);
 					}
-					if (!rateLimited(latestState)) return latest;
+					// With no entry the pool records no block, so there is nothing to release.
+					if (!latestState || !rateLimited(latestState)) return latest;
 					const { lease: _lease, ...cleared } = clearRateLimit(latestState);
 					reconciled = true;
 					return cleared;
