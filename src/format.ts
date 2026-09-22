@@ -33,6 +33,9 @@ const BAR_EMPTY = "░";
 /** Reset times are right-aligned to the bar's right edge. */
 const ROW_WIDTH = ROW_INDENT.length + BAR_WIDTH;
 
+/** Marks the accounts the host currently refuses, and only those. */
+const BLOCKED_SUFFIX = " - blocked";
+
 /**
  * The account label appears only for a provider that pools more than one
  * account, which is exactly when the adapter sets it: single-account output
@@ -139,8 +142,9 @@ function formatFailure(result: ProviderFailure): string {
 
 function formatSuccess(result: ProviderSuccess, now: Date): string {
 	const lines = result.windows.flatMap((window) => formatWindow(window, now));
+	const header = `${bracketed(result.displayName, result.account)}${result.blocked ? BLOCKED_SUFFIX : ""}`;
 
-	return [`${HEADER_INDENT}${bracketed(result.displayName, result.account)}`, ...lines].join("\n");
+	return [`${HEADER_INDENT}${header}`, ...lines].join("\n");
 }
 
 /**

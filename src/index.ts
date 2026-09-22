@@ -27,19 +27,31 @@ function isAbortError(error: unknown): boolean {
  * provider's answer or crash the command.
  */
 function guarded(
-	pending: Promise<ProviderResult>,
+	pending: Promise<AccountLookup>,
 	provider: ProviderId,
 	account: AccountFields,
-): Promise<ProviderResult> {
-	return pending.catch((error: unknown): ProviderResult => {
+): Promise<AccountLookup> {
+	return pending.catch((error: unknown): AccountLookup => {
 		if (isAbortError(error)) throw error;
-		return { kind: "failure", provider, reason: { type: "invalid-response" }, ...account };
+		return {
+			result: { kind: "failure", provider, reason: { type: "invalid-response" }, ...account },
+		};
 	});
 }
 
 interface QuotaLookupOptions {
 	readonly signal: AbortSignal;
 	readonly account?: QuotaAccount;
+}
+
+/**
+ * One account's answer together with the reconciliation that decides what its
+ * recorded block should become once the quota is known. The two travel together
+ * so an account's block state is never matched to another account's answer.
+ */
+interface AccountLookup {
+	readonly result: ProviderResult;
+	readonly reconcile?: QuotaRecovery | undefined;
 }
 
 /**
@@ -51,17 +63,17 @@ interface QuotaLookupOptions {
 function providerLookups(
 	provider: ProviderId,
 	accounts: readonly QuotaAccount[],
-	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
+	fetchQuota: (options: QuotaLookupOptions) => Promise<AccountLookup>,
 	signal: AbortSignal,
-): readonly Promise<ProviderResult>[] {
+): readonly Promise<AccountLookup>[] {
 	if (accounts.length === 0) {
 		return [guarded(fetchQuota({ signal }), provider, {})];
 	}
 	return accounts.map((account) =>
-		guarded(fetchQuota({ signal, account }), provider, accountFields(account)).then((result) => {
-			if (accounts.length > 1) return result;
-			const { account: _label, ...unlabelled } = result;
-			return unlabelled;
+		guarded(fetchQuota({ signal, account }), provider, accountFields(account)).then((lookup) => {
+			if (accounts.length > 1) return lookup;
+			const { account: _label, ...unlabelled } = lookup.result;
+			return { ...lookup, result: unlabelled };
 		}),
 	);
 }
@@ -74,8 +86,8 @@ function providerLookups(
 function claudeSdkOauthLookups(
 	registry: QuotaModelRegistry,
 	signal: AbortSignal,
-	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
-): readonly Promise<ProviderResult>[] {
+	fetchQuota: (options: QuotaLookupOptions) => Promise<AccountLookup>,
+): readonly Promise<AccountLookup>[] {
 	const accounts = listClaudeSdkOauthAccounts(registry);
 	if (accounts.length === 0) return [];
 	return providerLookups("claude-sdk-oauth", accounts, fetchQuota, signal);
@@ -104,29 +116,23 @@ export default function (pi: ExtensionAPI): void {
 			ctx.ui.setStatus(STATUS_KEY, LOADING_STATUS);
 			try {
 				const registry = ctx.modelRegistry;
-				const recoveries: Array<() => Promise<void>> = [];
 				let recoveryFailed = false;
 				const withRecovery =
 					(
 						provider: ProviderId,
 						fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
 					) =>
-					async (options: QuotaLookupOptions): Promise<ProviderResult> => {
+					async (options: QuotaLookupOptions): Promise<AccountLookup> => {
 						// Persistence is best-effort; errors must never hide the quota.
-						let recover: QuotaRecovery | undefined;
+						let reconcile: QuotaRecovery | undefined;
 						try {
-							recover = await prepareQuotaRecovery(registry, provider, options.account);
+							reconcile = await prepareQuotaRecovery(registry, provider, options.account);
 						} catch {
 							recoveryFailed = true;
 						}
-						const result = await fetchQuota(options);
-						if (recover) {
-							const apply = recover;
-							recoveries.push(() => apply(result, controller.signal));
-						}
-						return result;
+						return { result: await fetchQuota(options), reconcile };
 					};
-				const results = await Promise.all([
+				const lookups = await Promise.all([
 					...providerLookups(
 						"openai-codex",
 						listQuotaAccounts(registry, "openai-codex", true),
@@ -148,12 +154,19 @@ export default function (pi: ExtensionAPI): void {
 					),
 				]);
 				if (currentController !== controller) return;
-				for (const recover of recoveries) {
+				const results: ProviderResult[] = [];
+				for (const lookup of lookups) {
+					let blocked = false;
 					try {
-						await recover();
+						blocked = (await lookup.reconcile?.(lookup.result, controller.signal)) ?? false;
 					} catch {
 						recoveryFailed = true;
 					}
+					results.push(
+						blocked && lookup.result.kind === "success"
+							? { ...lookup.result, blocked }
+							: lookup.result,
+					);
 				}
 				if (currentController !== controller) return;
 				// A provider holding no OAuth is not part of the answer, so an
@@ -165,7 +178,7 @@ export default function (pi: ExtensionAPI): void {
 				}
 				if (recoveryFailed) {
 					ctx.ui.notify(
-						"Could not clear quota rate-limit blocks. Quota results are unchanged.",
+						"Could not update quota rate-limit blocks. Quota results are unchanged.",
 						"warning",
 					);
 				}

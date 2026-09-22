@@ -11,7 +11,14 @@ function prop(value: Value | undefined, key: string): unknown {
 }
 const TOKEN = "recovery-test-token";
 
-function fixture(names = ["one"]) {
+const UNBLOCKED: Value = {};
+
+function blockedNow(): Value {
+	return { blockReason: "rate_limit", blockedUntil: Date.now() + 60_000 };
+}
+
+/** `block` is the block both places start with; `UNBLOCKED` starts them clean. */
+function fixture(names = ["one"], block: Value = blockedNow()) {
 	let credential: Value = {
 		type: "oauth",
 		access: "claude-sdk-oauth-managed",
@@ -21,8 +28,7 @@ function fixture(names = ["one"]) {
 			displayName: "same label",
 			access: `${TOKEN}-${name}`,
 			refresh: "refresh",
-			blockReason: "rate_limit",
-			blockedUntil: Date.now() + 60_000,
+			...block,
 		})),
 	};
 	const states = new Map<string, Value>();
@@ -30,9 +36,8 @@ function fixture(names = ["one"]) {
 		states.set(name, {
 			stateVersion: 1,
 			credentialRevision: "revision",
-			blockReason: "rate_limit",
-			blockedUntil: Date.now() + 60_000,
 			failureCount: 2,
+			...block,
 		});
 	const notices: string[] = [];
 	let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
@@ -134,6 +139,7 @@ describe("quota-backed recovery", () => {
 		expect(prop(f.states.get("one"), "blockReason")).toBeUndefined();
 		expect(prop(f.states.get("one"), "blockedUntil")).toBeUndefined();
 		expect(f.notices.join("")).toContain("[Claude SDK]");
+		expect(f.notices.join("")).not.toContain("blocked");
 		expect(f.notices.join("")).not.toContain(TOKEN);
 	});
 
@@ -193,6 +199,7 @@ describe("quota-backed recovery", () => {
 		await f.run();
 		expect(f.credential).toEqual(before);
 		expect(prop(f.states.get("one"), "blockReason")).toBe(reason);
+		expect(f.notices.join("")).toContain("[Claude SDK] - blocked");
 	});
 
 	it.each(["credential", "block", "cancel"])(
@@ -227,6 +234,105 @@ describe("quota-backed recovery", () => {
 		},
 	);
 
+	it("reports the account unblocked when only the sidecar carried the block", async () => {
+		const f = fixture(["one"], UNBLOCKED);
+		f.states.set("one", { ...f.states.get("one"), ...blockedNow() });
+		await f.run();
+		expect(prop(f.states.get("one"), "blockReason")).toBeUndefined();
+		expect(f.notices.join("")).toContain("[Claude SDK]");
+		expect(f.notices.join("")).not.toContain("blocked");
+	});
+
+	it("records a rate-limit block in both places when the quota is exhausted", async () => {
+		const f = fixture(["one"], UNBLOCKED);
+		const resetAt = new Date(Date.now() + 3 * 3_600_000);
+		respond({
+			five_hour: { utilization: 100, resets_at: resetAt.toISOString() },
+			seven_day: { utilization: 20 },
+		});
+		await f.run();
+		expect(prop(f.credential, "accounts")).toEqual([
+			{
+				name: "one",
+				displayName: "same label",
+				access: `${TOKEN}-one`,
+				refresh: "refresh",
+				blockReason: "rate_limit",
+				blockedUntil: resetAt.getTime(),
+			},
+		]);
+		expect(prop(f.states.get("one"), "blockReason")).toBe("rate_limit");
+		expect(prop(f.states.get("one"), "blockedUntil")).toBe(resetAt.getTime());
+		expect(f.notices.join("")).toContain("[Claude SDK] - blocked");
+	});
+
+	it("replaces an expired block with one that ends at the exhausted window's reset", async () => {
+		const f = fixture(["one"], { blockReason: "rate_limit", blockedUntil: Date.now() - 60_000 });
+		const resetAt = new Date(Date.now() + 90 * 60_000);
+		respond({
+			five_hour: { utilization: 10 },
+			seven_day: { utilization: 100, resets_at: resetAt.toISOString() },
+		});
+		await f.run();
+		expect(prop(f.states.get("one"), "blockedUntil")).toBe(resetAt.getTime());
+		expect(f.notices.join("")).toContain("- blocked");
+	});
+
+	it("blocks for a minute without a reset time and caps a distant reset at two days", async () => {
+		const before = Date.now();
+		const short = fixture(["one"], UNBLOCKED);
+		respond({ five_hour: { utilization: 100 }, seven_day: { utilization: 20 } });
+		await short.run();
+		const shortUntil = Number(prop(short.states.get("one"), "blockedUntil"));
+		expect(shortUntil).toBeGreaterThanOrEqual(before + 60_000);
+		expect(shortUntil).toBeLessThanOrEqual(Date.now() + 60_000);
+
+		const capped = fixture(["one"], UNBLOCKED);
+		respond({
+			five_hour: { utilization: 100, resets_at: new Date(before + 10 * 86_400_000).toISOString() },
+			seven_day: { utilization: 20 },
+		});
+		await capped.run();
+		const cappedUntil = Number(prop(capped.states.get("one"), "blockedUntil"));
+		expect(cappedUntil).toBeGreaterThanOrEqual(before + 172_800_000);
+		expect(cappedUntil).toBeLessThanOrEqual(Date.now() + 172_800_000);
+	});
+
+	it("leaves an account that is already blocked untouched and still reports it blocked", async () => {
+		const f = fixture();
+		const before = structuredClone(f.credential);
+		respond({ five_hour: { utilization: 100 }, seven_day: { utilization: 20 } });
+		await f.run();
+		expect(f.credential).toEqual(before);
+		expect(prop(f.states.get("one"), "stateVersion")).toBe(1);
+		expect(f.notices.join("")).toContain("[Claude SDK] - blocked");
+	});
+
+	it.each(["credential", "block", "cancel"])(
+		"records no block after concurrent %s change",
+		async (change) => {
+			const f = fixture(["one"], UNBLOCKED);
+			vi.stubGlobal("fetch", async () => {
+				if (change === "credential")
+					f.credential = {
+						...f.credential,
+						accounts: [{ name: "one", access: "rotated" }],
+					};
+				if (change === "block") f.states.set("one", { ...f.states.get("one"), stateVersion: 2 });
+				if (change === "cancel") f.cancel();
+				return {
+					ok: true,
+					status: 200,
+					headers: { get: () => null },
+					json: async () => ({ five_hour: { utilization: 100 }, seven_day: { utilization: 20 } }),
+				};
+			});
+			await f.run();
+			expect(JSON.stringify(f.credential)).not.toContain("rate_limit");
+			expect(prop(f.states.get("one"), "blockReason")).toBeUndefined();
+		},
+	);
+
 	it("still shows quota and a safe warning when persistence fails", async () => {
 		const f = fixture();
 		f.storage.modify = async () => {
@@ -234,7 +340,7 @@ describe("quota-backed recovery", () => {
 		};
 		await f.run();
 		expect(f.notices.join("")).toContain("[Claude SDK]");
-		expect(f.notices.join("")).toContain("Could not clear");
+		expect(f.notices.join("")).toContain("Could not update quota rate-limit blocks");
 		expect(f.notices.join("")).not.toContain(TOKEN);
 	});
 });

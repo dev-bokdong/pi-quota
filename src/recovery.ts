@@ -1,8 +1,25 @@
 import { hostCall, type QuotaModelRegistry, readProperty } from "./auth.ts";
-import type { ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
+import type { ProviderId, ProviderResult, QuotaAccount, QuotaWindow } from "./types.ts";
+import { clampPercent } from "./types.ts";
 
 type RecordValue = Record<string, unknown>;
-export type QuotaRecovery = (result: ProviderResult, signal: AbortSignal) => Promise<void>;
+/**
+ * Reconciles one account's recorded block with the quota just read and resolves
+ * to whether the host still refuses that account afterwards.
+ */
+export type QuotaRecovery = (result: ProviderResult, signal: AbortSignal) => Promise<boolean>;
+
+/** The windows that decide whether the account can serve a request right now. */
+const GATING_WINDOWS = ["Five-hour", "Weekly"] as const;
+/** The host's own ceiling for a rate-limit cooldown. */
+const MAX_BLOCK_MS = 172_800_000;
+/** The host's own cooldown for a rate limit whose reset time is unknown. */
+const DEFAULT_BLOCK_MS = 60_000;
+
+/** What the quota says should happen to the block recorded for the account. */
+type Reconciliation =
+	| { readonly kind: "clear" }
+	| { readonly kind: "block"; readonly until: number };
 
 function record(value: unknown): RecordValue | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -24,6 +41,43 @@ function permanent(block: unknown): boolean {
 	return reason === "auth_error" || reason === "account_disabled";
 }
 
+function rateLimited(block: unknown): boolean {
+	return readProperty(block, "blockReason") === "rate_limit";
+}
+
+/** The host's own reading of a recorded block: a lapsed cooldown blocks nobody. */
+function isBlocked(block: unknown, now: number): boolean {
+	if (permanent(block)) return true;
+	const until = readProperty(block, "blockedUntil");
+	return typeof until === "number" && until > now;
+}
+
+/**
+ * Reads the block the quota implies. A gating window reported as spent holds the
+ * account until it resets, quota left in every gating window releases it, and an
+ * answer that shows neither - a missing window - says nothing either way. The
+ * percentages are read exactly as the output rounds them, so the block always
+ * agrees with the numbers the user is shown.
+ */
+function reconciliationFor(result: ProviderResult, now: number): Reconciliation | undefined {
+	if (result.kind !== "success") return undefined;
+	const gating = GATING_WINDOWS.map((label) =>
+		result.windows.find((window) => window.label === label),
+	);
+	const spent = gating.filter(
+		(window): window is QuotaWindow =>
+			window !== undefined && clampPercent(window.remainingPercent) <= 0,
+	);
+	if (spent.length === 0) {
+		return gating.every((window) => window !== undefined) ? { kind: "clear" } : undefined;
+	}
+	const resets = spent
+		.map((window) => window.resetAt?.getTime())
+		.filter((reset): reset is number => reset !== undefined && reset > now);
+	const until = resets.length === 0 ? now + DEFAULT_BLOCK_MS : Math.max(...resets);
+	return { kind: "block", until: Math.min(until, now + MAX_BLOCK_MS) };
+}
+
 function sameMaterial(left: unknown, right: unknown): boolean {
 	return ["access", "refresh", "key", "expires"].every(
 		(key) => readProperty(left, key) === readProperty(right, key),
@@ -42,10 +96,15 @@ function clearRateLimit(value: RecordValue): RecordValue {
 	return rest;
 }
 
+function withRateLimit(value: RecordValue, until: number): RecordValue {
+	return { ...value, blockReason: "rate_limit", blockedUntil: until };
+}
+
 /**
  * Snapshot before the HTTP request, then compare under the host's locks.
  * loadCredentialPool is an optional runtime capability (not a public import);
- * without it we cannot rule out a permanent sidecar block, so stay read-only.
+ * without it we cannot rule out a permanent sidecar block, so stay read-only
+ * and say nothing about whether the account is blocked.
  */
 export async function prepareQuotaRecovery(
 	registry: QuotaModelRegistry,
@@ -76,32 +135,36 @@ export async function prepareQuotaRecovery(
 	const lane = slot ? "stored" : "env";
 	const block = slot ?? record(readProperty(readProperty(credential, "slotState"), account.name));
 	const state = record(readProperty(await list(provider, lane), account.name));
-	if (permanent(block) || permanent(state)) return undefined;
-	if (
-		readProperty(block, "blockReason") !== "rate_limit" &&
-		readProperty(state, "blockReason") !== "rate_limit"
-	) {
-		return undefined;
-	}
+	// Only a re-login retires a permanent block, so it is reported, never rewritten.
+	if (permanent(block) || permanent(state)) return async () => true;
+	const report: QuotaRecovery = async () => {
+		const now = Date.now();
+		return isBlocked(block, now) || isBlocked(state, now);
+	};
 	const revisionMethod = hostCall(
 		repository,
 		slot ? "storedCredentialRevision" : "envCredentialRevision",
 	);
-	if (!revisionMethod) return undefined;
+	if (!revisionMethod) return report;
 	const revision = slot
 		? await revisionMethod(provider, account.name, slot)
 		: await revisionMethod(envName, envToken);
 	// A stale sidecar belongs to different credentials and must not be rewritten.
-	if (state && readProperty(state, "credentialRevision") !== revision) return undefined;
+	if (state && readProperty(state, "credentialRevision") !== revision) return report;
 
 	return async (result, signal) => {
-		if (signal.aborted || result.kind !== "success") return;
-		if (
-			!["Five-hour", "Weekly"].every((label) =>
-				result.windows.some((window) => window.label === label && window.remainingPercent > 0),
-			)
-		)
-			return;
+		const now = Date.now();
+		const wasBlocked = isBlocked(block, now) || isBlocked(state, now);
+		if (signal.aborted) return wasBlocked;
+		const intent = reconciliationFor(result, now);
+		if (!intent) return wasBlocked;
+		// An account the host already refuses needs no second block, and one that
+		// carries no rate-limit block has nothing to release.
+		if (intent.kind === "block" && wasBlocked) return true;
+		if (intent.kind === "clear" && !rateLimited(block) && !rateLimited(state)) return false;
+		// Set by whichever of the two records the reconciliation actually rewrote:
+		// a block recorded in only one of them is still reconciled by that one write.
+		let reconciled = false;
 		await modify(
 			provider,
 			async (current: unknown) => {
@@ -128,27 +191,34 @@ export async function prepareQuotaRecovery(
 					)
 						return latest;
 					matched = true;
-					if (!latestState || readProperty(latestState, "blockReason") !== "rate_limit")
-						return latest;
+					// The host owns the shape of a sidecar entry, so one is never invented here.
+					if (!latestState) return latest;
+					if (intent.kind === "block") {
+						const { lease: _lease, ...held } = latestState;
+						reconciled = true;
+						return withRateLimit(held, intent.until);
+					}
+					if (!rateLimited(latestState)) return latest;
 					const { lease: _lease, ...cleared } = clearRateLimit(latestState);
+					reconciled = true;
 					return cleared;
 				});
-				if (
-					!matched ||
-					signal.aborted ||
-					!currentBlock ||
-					readProperty(currentBlock, "blockReason") !== "rate_limit"
-				) {
-					return current;
-				}
+				if (!matched || signal.aborted) return current;
+				const nextBlock =
+					intent.kind === "block"
+						? withRateLimit(currentBlock ?? {}, intent.until)
+						: currentBlock && rateLimited(currentBlock)
+							? clearRateLimit(currentBlock)
+							: undefined;
 				const currentRecord = record(current);
-				if (!currentRecord) return current;
+				if (!nextBlock || !currentRecord) return current;
+				reconciled = true;
 				if (!slot) {
 					return {
 						...currentRecord,
 						slotState: {
 							...record(readProperty(currentRecord, "slotState")),
-							[account.name]: clearRateLimit(currentBlock),
+							[account.name]: nextBlock,
 						},
 					};
 				}
@@ -157,12 +227,13 @@ export async function prepareQuotaRecovery(
 					? {
 							...currentRecord,
 							accounts: accounts.map((entry: unknown) =>
-								readProperty(entry, "name") === account.name ? clearRateLimit(currentBlock) : entry,
+								readProperty(entry, "name") === account.name ? nextBlock : entry,
 							),
 						}
-					: clearRateLimit(currentRecord);
+					: nextBlock;
 			},
 			{ signal },
 		);
+		return intent.kind === "block" ? reconciled : !reconciled && wasBlocked;
 	};
 }

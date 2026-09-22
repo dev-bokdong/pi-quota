@@ -186,6 +186,26 @@ describe("formatQuotaResults", () => {
 		);
 	});
 
+	it("marks a blocked account and leaves every other block unmarked", () => {
+		const blocked = {
+			...openAiSuccess,
+			account: "default",
+			blocked: true,
+			windows: [{ label: "Five-hour", remainingPercent: 0, resetAt: new Date(2026, 7, 8, 9) }],
+		} as const satisfies ProviderResult;
+		const usable = { ...openAiSuccess, account: "work", windows: [] } as const;
+
+		expect(formatQuotaResults([blocked, usable], now)).toBe(
+			[
+				"   [OpenAI: default] - blocked",
+				"     Five-hour              2h",
+				"     ░░░░░░░░░░░░░░░░░░░░░░░░░ 0%",
+				"",
+				"   [OpenAI: work]",
+			].join("\n"),
+		);
+	});
+
 	it("renders one labelled block per account of the same provider", () => {
 		const first = { ...openAiSuccess, account: "default", windows: [] } as const;
 		const second = { ...openAiSuccess, account: "work", windows: [] } as const;

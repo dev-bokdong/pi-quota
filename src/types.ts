@@ -30,6 +30,12 @@ export interface ProviderSuccess {
 	readonly displayName: string;
 	readonly windows: readonly QuotaWindow[];
 	readonly account?: string;
+	/**
+	 * Whether the host still refuses this account once the quota just read has
+	 * been reconciled with the recorded block. Absent when the host exposes no
+	 * block state to read, which is not the same as a known-usable account.
+	 */
+	readonly blocked?: boolean;
 }
 
 export type UnavailableReason =
