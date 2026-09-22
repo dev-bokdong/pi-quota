@@ -252,6 +252,31 @@ describe("resolveOAuthCredentials", () => {
 		expect(result).toEqual({ ok: true, credentials: { accessToken: SECRET_TOKEN } });
 	});
 
+	it("resolves a provider the host has renamed", async () => {
+		const registry = fakeRegistry({
+			getAvailable: () => [{ provider: "chatgpt-subscription" }],
+			isUsingOAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: SECRET_TOKEN }),
+		});
+		const result = await resolveOAuthCredentials(registry, "openai-codex");
+		expect(result).toEqual({ ok: true, credentials: { accessToken: SECRET_TOKEN } });
+	});
+
+	it("asks slot-scoped auth under the host's own spelling of the provider", async () => {
+		const calls: SlotAuthCall[] = [];
+		const registry = fakeRegistry({
+			...pooledRegistry({ calls, slotAuth: () => ({ auth: { apiKey: ACCOUNT_TOKEN } }) }),
+			getAvailable: () => [{ provider: "chatgpt-subscription" }],
+		});
+
+		const result = await resolveOAuthCredentials(registry, "openai-codex", "login-2");
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: ACCOUNT_TOKEN } });
+		expect(calls).toEqual([
+			{ provider: "chatgpt-subscription", overrides: { slotName: "login-2" } },
+		]);
+	});
+
 	it("never leaks an underlying error message when auth resolution throws", async () => {
 		const registry = fakeRegistry({
 			getAvailable: () => [{ provider: "openai-codex" }],
@@ -341,17 +366,30 @@ describe("listClaudeSdkOauthAccounts", () => {
 		expect(listClaudeSdkOauthAccounts(registry, noEnv)).toEqual([]);
 	});
 
-	it("reads the claude-sdk-oauth provider's slots only", () => {
+	it("reads this provider's own ids only, the host's newest spelling first", () => {
 		const providers: string[] = [];
 		const registry = claudeRegistry({
 			listSlots: (provider: string) => {
 				providers.push(provider);
-				return [usableSlot("default", CLAUDE_TOKEN)];
+				return provider === "claude-sdk-oauth" ? [usableSlot("default", CLAUDE_TOKEN)] : [];
 			},
 		});
 
-		listClaudeSdkOauthAccounts(registry, noEnv);
-		expect(providers).toEqual(["claude-sdk-oauth"]);
+		expect(listClaudeSdkOauthAccounts(registry, noEnv)).toEqual([
+			{ name: "default", label: "default" },
+		]);
+		expect(providers).toEqual(["anthropic-subscription", "claude-sdk-oauth"]);
+	});
+
+	it("reads the slots of a host that renamed the provider", () => {
+		const registry = claudeRegistry({
+			listSlots: (provider: string) =>
+				provider === "anthropic-subscription" ? [usableSlot("default", CLAUDE_TOKEN)] : [],
+		});
+
+		expect(listClaudeSdkOauthAccounts(registry, noEnv)).toEqual([
+			{ name: "default", label: "default" },
+		]);
 	});
 
 	it("lists environment accounts under the host's own account names", () => {

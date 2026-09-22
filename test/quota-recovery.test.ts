@@ -27,7 +27,13 @@ function revisionFor(name: string): string {
  * `sidecar: false` leaves the credential pool without an entry for the account,
  * the shape a provider whose pool lane was never written carries.
  */
-function fixture(names = ["one"], block: Value = blockedNow(), sidecar = true) {
+function fixture(
+	names = ["one"],
+	block: Value = blockedNow(),
+	sidecar = true,
+	/** The spelling this host keys the provider's own records by. */
+	hostKey: string = PROVIDER,
+) {
 	let credential: Value = {
 		type: "oauth",
 		access: "claude-sdk-oauth-managed",
@@ -50,6 +56,8 @@ function fixture(names = ["one"], block: Value = blockedNow(), sidecar = true) {
 				...block,
 			});
 	const notices: string[] = [];
+	/** Every provider id the host was asked to write under. */
+	const written: string[] = [];
 	let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
 	let shutdown: (() => void) | undefined;
 	const repository = {
@@ -57,11 +65,12 @@ function fixture(names = ["one"], block: Value = blockedNow(), sidecar = true) {
 		storedCredentialRevision: async () => "stored-revision",
 		envCredentialRevision: async () => "env-revision",
 		mutateSlotState: async (
-			_provider: string,
+			provider: string,
 			_lane: string,
 			name: string,
 			fn: (current: Value | undefined) => Value | undefined,
 		) => {
+			written.push(provider);
 			// The host owns stateVersion: it counts the entry's own revisions, so a
 			// created entry starts at 1 whatever the callback returned.
 			const current = states.get(name);
@@ -75,9 +84,11 @@ function fixture(names = ["one"], block: Value = blockedNow(), sidecar = true) {
 		},
 	};
 	const storage = {
-		listSlots: (provider: string) => (provider === PROVIDER ? prop(credential, "accounts") : []),
-		read: async () => structuredClone(credential),
-		modify: async (_provider: string, fn: (current: Value) => Promise<Value>) => {
+		listSlots: (provider: string) => (provider === hostKey ? prop(credential, "accounts") : []),
+		read: async (provider: string) =>
+			provider === hostKey ? structuredClone(credential) : undefined,
+		modify: async (provider: string, fn: (current: Value) => Promise<Value>) => {
+			written.push(provider);
 			credential = await fn(credential);
 		},
 	};
@@ -106,6 +117,7 @@ function fixture(names = ["one"], block: Value = blockedNow(), sidecar = true) {
 		storage,
 		registry,
 		notices,
+		written,
 		get credential() {
 			return credential;
 		},
@@ -158,6 +170,22 @@ describe("quota-backed recovery", () => {
 		expect(f.notices.join("")).toContain("[Claude SDK]");
 		expect(f.notices.join("")).not.toContain("blocked");
 		expect(f.notices.join("")).not.toContain(TOKEN);
+	});
+
+	it("writes only under the provider id this host keys its records by", async () => {
+		const f = fixture();
+		await f.run();
+		expect([...new Set(f.written)]).toEqual([PROVIDER]);
+	});
+
+	it("recovers a renamed provider, writing under the host's new id", async () => {
+		const f = fixture(["one"], blockedNow(), true, "anthropic-subscription");
+		await f.run();
+		expect(prop(f.states.get("one"), "blockReason")).toBeUndefined();
+		expect(prop(f.credential, "accounts")).toEqual([
+			{ name: "one", displayName: "same label", access: `${TOKEN}-one`, refresh: "refresh" },
+		]);
+		expect([...new Set(f.written)]).toEqual(["anthropic-subscription"]);
 	});
 
 	it("keeps account identity despite duplicate labels and only recovers the positive account", async () => {

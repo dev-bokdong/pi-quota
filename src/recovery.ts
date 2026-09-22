@@ -1,4 +1,4 @@
-import { hostCall, type QuotaModelRegistry, readProperty } from "./auth.ts";
+import { hostCall, hostProviderIds, type QuotaModelRegistry, readProperty } from "./auth.ts";
 import type { ProviderId, ProviderResult, QuotaAccount, QuotaWindow } from "./types.ts";
 import { clampPercent } from "./types.ts";
 
@@ -121,7 +121,16 @@ export async function prepareQuotaRecovery(
 	const list = hostCall(repository, "listSlots");
 	const mutate = hostCall(repository, "mutateSlotState");
 	if (!list || !mutate) return undefined;
-	const credential = await read(provider);
+	// The host keys its own records by its spelling of the provider, so the id
+	// that actually holds this provider's credential is the one used throughout.
+	const hostIds = hostProviderIds(provider);
+	let hostProvider = hostIds[0] ?? provider;
+	let credential = await read(hostProvider);
+	for (const candidate of hostIds.slice(1)) {
+		if (credential !== undefined) break;
+		hostProvider = candidate;
+		credential = await read(candidate);
+	}
 	const slot = storedSlot(credential, account.name);
 	const envName =
 		account.name === "env"
@@ -134,7 +143,7 @@ export async function prepareQuotaRecovery(
 	if (!slot && !envToken) return undefined;
 	const lane = slot ? "stored" : "env";
 	const block = slot ?? record(readProperty(readProperty(credential, "slotState"), account.name));
-	const state = record(readProperty(await list(provider, lane), account.name));
+	const state = record(readProperty(await list(hostProvider, lane), account.name));
 	// Only a re-login retires a permanent block, so it is reported, never rewritten.
 	if (permanent(block) || permanent(state)) return async () => true;
 	const report: QuotaRecovery = async () => {
@@ -147,7 +156,7 @@ export async function prepareQuotaRecovery(
 	);
 	if (!revisionMethod) return report;
 	const revision = slot
-		? await revisionMethod(provider, account.name, slot)
+		? await revisionMethod(hostProvider, account.name, slot)
 		: await revisionMethod(envName, envToken);
 	// A stale sidecar belongs to different credentials and must not be rewritten.
 	if (state && readProperty(state, "credentialRevision") !== revision) return report;
@@ -166,7 +175,7 @@ export async function prepareQuotaRecovery(
 		// a block recorded in only one of them is still reconciled by that one write.
 		let reconciled = false;
 		await modify(
-			provider,
+			hostProvider,
 			async (current: unknown) => {
 				if (signal.aborted) return current;
 				const currentSlot = storedSlot(current, account.name);
@@ -180,7 +189,7 @@ export async function prepareQuotaRecovery(
 					currentSlot ?? record(readProperty(readProperty(current, "slotState"), account.name));
 				if (!sameBlock(block, currentBlock) || permanent(currentBlock)) return current;
 				let matched = false;
-				await mutate(provider, lane, account.name, (latest: unknown) => {
+				await mutate(hostProvider, lane, account.name, (latest: unknown) => {
 					const latestState = record(latest);
 					if (
 						signal.aborted ||

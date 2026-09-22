@@ -38,6 +38,23 @@ const TOKEN_EXPIRED: AuthResolution = { ok: false, reason: "token-expired" };
 const CLAUDE_SDK_OAUTH_PROVIDER = "claude-sdk-oauth" as const;
 
 /**
+ * The spellings a host may use for one provider, canonical first. senpi
+ * 2026.9.22 renamed `openai-codex` to `chatgpt-subscription` and
+ * `claude-sdk-oauth` to `anthropic-subscription`; an older host still speaks
+ * only the legacy id, so both are tried and the host's own answer decides.
+ */
+const HOST_PROVIDER_IDS: Readonly<Record<ProviderId, readonly string[]>> = {
+	"openai-codex": ["chatgpt-subscription", "openai-codex"],
+	anthropic: ["anthropic"],
+	"claude-sdk-oauth": ["anthropic-subscription", "claude-sdk-oauth"],
+};
+
+/** Host spellings of one provider id, in the order they should be tried. */
+export function hostProviderIds(providerId: ProviderId): readonly string[] {
+	return HOST_PROVIDER_IDS[providerId];
+}
+
+/**
  * Marker the host projects onto the Claude SDK OAuth flat credential in place
  * of a token: the real material lives in each account's credential slot, and
  * the marker itself can never authenticate a request.
@@ -108,13 +125,16 @@ function storedSlots(registry: QuotaModelRegistry, providerId: ProviderId): read
 	const listSlots = hostCall(registry.authStorage, "listSlots");
 	if (!listSlots) return [];
 
-	let slots: unknown;
-	try {
-		slots = listSlots(providerId);
-	} catch {
-		return [];
+	for (const hostId of hostProviderIds(providerId)) {
+		let slots: unknown;
+		try {
+			slots = listSlots(hostId);
+		} catch {
+			return [];
+		}
+		if (Array.isArray(slots) && slots.length > 0) return slots;
 	}
-	return Array.isArray(slots) ? slots : [];
+	return [];
 }
 
 /** One Claude SDK OAuth account together with the token stored for it. */
@@ -241,7 +261,9 @@ async function accountAccessToken(
 			? await flatAccessToken(registry, model)
 			: undefined;
 	}
-	const resolved = await getAuth(providerId, { slotName: accountName });
+	// The host answers under its own spelling of the provider, which is the one
+	// its model carries.
+	const resolved = await getAuth(model.provider, { slotName: accountName });
 	const apiKey = readProperty(readProperty(resolved, "auth"), "apiKey");
 	return typeof apiKey === "string" && apiKey.length > 0 ? apiKey : undefined;
 }
@@ -255,7 +277,8 @@ export async function resolveOAuthCredentials(
 	providerId: ProviderId,
 	accountName?: string,
 ): Promise<AuthResolution> {
-	const model = registry.getAvailable().find((candidate) => candidate.provider === providerId);
+	const hostIds = hostProviderIds(providerId);
+	const model = registry.getAvailable().find((candidate) => hostIds.includes(candidate.provider));
 	if (!model) {
 		return NOT_CONFIGURED;
 	}
