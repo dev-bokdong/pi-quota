@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@code-yeongyu/senpi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerQuota from "../src/index.ts";
+import { prepareQuotaRecovery } from "../src/recovery.ts";
+import type { QuotaWindow } from "../src/types.ts";
 
 type Value = Record<string, unknown>;
 const PROVIDER = "claude-sdk-oauth";
@@ -233,6 +235,50 @@ describe("quota-backed recovery", () => {
 		const before = structuredClone(f.credential);
 		respond(payload);
 		await f.run();
+		expect(f.credential).toEqual(before);
+		expect(prop(f.states.get("one"), "stateVersion")).toBe(1);
+	});
+
+	async function reconcileOpenAi(f: ReturnType<typeof fixture>, windows: QuotaWindow[]) {
+		const reconcile = await prepareQuotaRecovery(f.registry as never, "openai-codex", {
+			name: "one",
+			label: "one",
+		});
+		if (!reconcile) throw new Error("no reconciliation prepared");
+		return reconcile(
+			{ kind: "success", provider: "openai-codex", displayName: "OpenAI", windows },
+			new AbortController().signal,
+		);
+	}
+
+	it.each(["Weekly", "Five-hour"])(
+		"recovers an account whose plan reports only the %s window",
+		async (label) => {
+			const f = fixture(["one"], blockedNow(), true, "chatgpt-subscription");
+			await expect(reconcileOpenAi(f, [{ label, remainingPercent: 80 }])).resolves.toBe(false);
+			expect(JSON.stringify(f.credential)).not.toContain("rate_limit");
+			expect(prop(f.states.get("one"), "blockReason")).toBeUndefined();
+		},
+	);
+
+	it("blocks an account whose only gating window is spent until it resets", async () => {
+		const f = fixture(["one"], UNBLOCKED, false, "chatgpt-subscription");
+		const resetAt = new Date(Date.now() + 24 * 3_600_000);
+		await expect(
+			reconcileOpenAi(f, [{ label: "Weekly", remainingPercent: 0, resetAt }]),
+		).resolves.toBe(true);
+		expect(prop(f.states.get("one"), "blockReason")).toBe("rate_limit");
+		expect(prop(f.states.get("one"), "blockedUntil")).toBe(resetAt.getTime());
+		expect(prop(f.states.get("one"), "credentialRevision")).toBe("stored-revision");
+		expect(JSON.stringify(f.credential)).toContain(`"blockedUntil":${resetAt.getTime()}`);
+	});
+
+	it("keeps the block when the answer carries no gating window", async () => {
+		const f = fixture(["one"], blockedNow(), true, "chatgpt-subscription");
+		const before = structuredClone(f.credential);
+		await expect(
+			reconcileOpenAi(f, [{ label: "Code Review", remainingPercent: 50 }]),
+		).resolves.toBe(true);
 		expect(f.credential).toEqual(before);
 		expect(prop(f.states.get("one"), "stateVersion")).toBe(1);
 	});

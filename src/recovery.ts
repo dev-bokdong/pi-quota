@@ -1,5 +1,5 @@
 import { hostCall, hostProviderIds, type QuotaModelRegistry, readProperty } from "./auth.ts";
-import type { ProviderId, ProviderResult, QuotaAccount, QuotaWindow } from "./types.ts";
+import type { ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
 import { clampPercent } from "./types.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -10,7 +10,7 @@ type RecordValue = Record<string, unknown>;
 export type QuotaRecovery = (result: ProviderResult, signal: AbortSignal) => Promise<boolean>;
 
 /** The windows that decide whether the account can serve a request right now. */
-const GATING_WINDOWS = ["Five-hour", "Weekly"] as const;
+const GATING_WINDOWS: ReadonlySet<string> = new Set(["Five-hour", "Weekly"]);
 /** The host's own ceiling for a rate-limit cooldown. */
 const MAX_BLOCK_MS = 172_800_000;
 /** The host's own cooldown for a rate limit whose reset time is unknown. */
@@ -54,22 +54,18 @@ function isBlocked(block: unknown, now: number): boolean {
 
 /**
  * Reads the block the quota implies. A gating window reported as spent holds the
- * account until it resets, quota left in every gating window releases it, and an
- * answer that shows neither - a missing window - says nothing either way. The
- * percentages are read exactly as the output rounds them, so the block always
- * agrees with the numbers the user is shown.
+ * account until it resets, and quota left in every gating window the answer
+ * reports releases it: a plan without a five-hour limit (ChatGPT Pro Lite)
+ * reports the weekly window alone. An answer with no gating window says nothing
+ * either way. The percentages are read exactly as the output rounds them, so the
+ * block always agrees with the numbers the user is shown.
  */
 function reconciliationFor(result: ProviderResult, now: number): Reconciliation | undefined {
 	if (result.kind !== "success") return undefined;
-	const gating = GATING_WINDOWS.map((label) =>
-		result.windows.find((window) => window.label === label),
-	);
-	const spent = gating.filter(
-		(window): window is QuotaWindow =>
-			window !== undefined && clampPercent(window.remainingPercent) <= 0,
-	);
+	const gating = result.windows.filter((window) => GATING_WINDOWS.has(window.label));
+	const spent = gating.filter((window) => clampPercent(window.remainingPercent) <= 0);
 	if (spent.length === 0) {
-		return gating.every((window) => window !== undefined) ? { kind: "clear" } : undefined;
+		return gating.length > 0 ? { kind: "clear" } : undefined;
 	}
 	const resets = spent
 		.map((window) => window.resetAt?.getTime())
