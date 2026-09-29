@@ -1,4 +1,4 @@
-import type { EnvReader, QuotaModelRegistry } from "../auth.ts";
+import type { EnvReader, QuotaModelRegistry, TokenRefresher } from "../auth.ts";
 import { resolveClaudeSdkOauthCredentials } from "../auth.ts";
 import type { FetchLike } from "../http.ts";
 import type { ProviderResult, QuotaAccount } from "../types.ts";
@@ -16,6 +16,8 @@ export interface ClaudeSdkOauthQuotaOptions {
 	readonly account?: QuotaAccount;
 	/** Reads the environment-provided accounts; defaults to this process's env. */
 	readonly env?: EnvReader;
+	/** Redeems an expired account's refresh token; defaults to the host's OAuth flow. */
+	readonly refresher?: TokenRefresher;
 }
 
 /**
@@ -29,7 +31,17 @@ export async function fetchClaudeSdkOauthQuota(
 	options: ClaudeSdkOauthQuotaOptions = {},
 ): Promise<ProviderResult> {
 	const account = accountFields(options.account);
-	const auth = resolveClaudeSdkOauthCredentials(registry, options.account?.name, options.env);
+	const auth = await resolveClaudeSdkOauthCredentials(
+		registry,
+		options.account?.name,
+		options.env,
+		{
+			...(options.signal ? { signal: options.signal } : {}),
+			...(options.refresher ? { refresher: options.refresher } : {}),
+		},
+	);
+	// Resolving may have awaited a refresh, during which the caller can cancel.
+	options.signal?.throwIfAborted();
 	if (!auth.ok) {
 		return { kind: "unavailable", provider: PROVIDER_ID, reason: auth.reason, ...account };
 	}

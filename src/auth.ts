@@ -34,6 +34,7 @@ export type AuthResolution =
 const NOT_CONFIGURED: AuthResolution = { ok: false, reason: "oauth-not-configured" };
 const UNSUPPORTED_AUTH: AuthResolution = { ok: false, reason: "unsupported-auth-method" };
 const TOKEN_EXPIRED: AuthResolution = { ok: false, reason: "token-expired" };
+const TOKEN_REFRESH_FAILED: AuthResolution = { ok: false, reason: "token-refresh-failed" };
 
 const CLAUDE_SDK_OAUTH_PROVIDER = "claude-sdk-oauth" as const;
 
@@ -119,21 +120,34 @@ export function listQuotaAccounts(
 	return accounts.length > 1 ? accounts : [];
 }
 
+interface HostSlots {
+	/** The host's own spelling of the provider the slots were read under. */
+	readonly hostId: string;
+	readonly slots: readonly unknown[];
+}
+
 /** Reads the provider's stored credential slots on a host that pools them. */
-function storedSlots(registry: QuotaModelRegistry, providerId: ProviderId): readonly unknown[] {
+function storedHostSlots(
+	registry: QuotaModelRegistry,
+	providerId: ProviderId,
+): HostSlots | undefined {
 	const listSlots = hostCall(registry.authStorage, "listSlots");
-	if (!listSlots) return [];
+	if (!listSlots) return undefined;
 
 	for (const hostId of hostProviderIds(providerId)) {
 		let slots: unknown;
 		try {
 			slots = listSlots(hostId);
 		} catch {
-			return [];
+			return undefined;
 		}
-		if (Array.isArray(slots) && slots.length > 0) return slots;
+		if (Array.isArray(slots) && slots.length > 0) return { hostId, slots };
 	}
-	return [];
+	return undefined;
+}
+
+function storedSlots(registry: QuotaModelRegistry, providerId: ProviderId): readonly unknown[] {
+	return storedHostSlots(registry, providerId)?.slots ?? [];
 }
 
 /** One Claude SDK OAuth account together with the token stored for it. */
@@ -142,6 +156,8 @@ interface ClaudeSdkOauthSlot {
 	readonly accessToken: string;
 	/** Epoch milliseconds, absent when the account's source reports no expiry. */
 	readonly expiresAt?: number;
+	/** Host provider id the slot is stored under; absent for an environment token. */
+	readonly hostId?: string;
 }
 
 function toClaudeSdkOauthSlot(slot: unknown): ClaudeSdkOauthSlot | undefined {
@@ -170,10 +186,11 @@ function claudeSdkOauthSlots(
 	env: EnvReader,
 ): readonly ClaudeSdkOauthSlot[] {
 	const slots: ClaudeSdkOauthSlot[] = [];
-	for (const raw of storedSlots(registry, CLAUDE_SDK_OAUTH_PROVIDER)) {
+	const stored = storedHostSlots(registry, CLAUDE_SDK_OAUTH_PROVIDER);
+	for (const raw of stored?.slots ?? []) {
 		const slot = toClaudeSdkOauthSlot(raw);
 		if (slot && !slots.some((existing) => existing.account.name === slot.account.name)) {
-			slots.push(slot);
+			slots.push(stored ? { ...slot, hostId: stored.hostId } : slot);
 		}
 	}
 
@@ -205,29 +222,180 @@ export function listClaudeSdkOauthAccounts(
 	return claudeSdkOauthSlots(registry, env).map((slot) => slot.account);
 }
 
+/** The token material an OAuth refresh answers with. */
+export interface RefreshedTokens {
+	readonly access: string;
+	readonly refresh: string;
+	/** Epoch milliseconds. */
+	readonly expires: number;
+}
+
+/** Redeems one refresh token; rejects when the grant cannot be redeemed. */
+export type TokenRefresher = (
+	refreshToken: string,
+	signal?: AbortSignal,
+) => Promise<RefreshedTokens>;
+
+export interface ClaudeSdkOauthRefreshOptions {
+	readonly signal?: AbortSignal;
+	/** Redeems a refresh token; defaults to the host's Anthropic OAuth flow. */
+	readonly refresher?: TokenRefresher;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Refreshes through the same Anthropic OAuth flow the host's own lane uses,
+ * loaded from the host runtime so the extension ships no OAuth client.
+ */
+const refreshWithAnthropicOAuth: TokenRefresher = async (refreshToken, signal) => {
+	const module: unknown = await import("@earendil-works/pi-ai/oauth");
+	const load = hostCall(module, "loadAnthropicOAuth");
+	if (!load) throw new Error("Anthropic OAuth is unavailable on this host");
+	const refresh = hostCall(await load(), "refresh");
+	if (!refresh) throw new Error("Anthropic OAuth cannot refresh on this host");
+	const credential = await refresh(
+		{ type: "oauth", access: "", refresh: refreshToken, expires: 0 },
+		signal,
+	);
+	const access = nonEmptyString(readProperty(credential, "access"));
+	const rotated = nonEmptyString(readProperty(credential, "refresh"));
+	const expires = positiveNumber(readProperty(credential, "expires"));
+	if (access === undefined || rotated === undefined || expires === undefined) {
+		throw new Error("Anthropic OAuth refresh answered without token material");
+	}
+	return { access, refresh: rotated, expires };
+};
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
+function isStoreBusyError(error: unknown): boolean {
+	return error instanceof Error && error.name === "CredentialStoreBusyError";
+}
+
+function isExpired(expires: number | undefined): boolean {
+	return expires !== undefined && expires <= Date.now();
+}
+
+function storedAccounts(credential: unknown): readonly unknown[] | undefined {
+	const accounts = readProperty(credential, "accounts");
+	return Array.isArray(accounts) ? accounts : undefined;
+}
+
+function findStoredAccount(credential: unknown, accountName: string): unknown {
+	return storedAccounts(credential)?.find((slot) => readProperty(slot, "name") === accountName);
+}
+
+/** The token a stored account now holds, when it is readable and not expired. */
+function usableStoredToken(credential: unknown, accountName: string): AuthResolution {
+	const slot = findStoredAccount(credential, accountName);
+	const access = nonEmptyString(readProperty(slot, "access"));
+	if (access === undefined || access === CLAUDE_SDK_OAUTH_SENTINEL) return TOKEN_EXPIRED;
+	if (isExpired(positiveNumber(readProperty(slot, "expires")))) return TOKEN_EXPIRED;
+	return { ok: true, credentials: { accessToken: access } };
+}
+
+/**
+ * Refreshes one expired stored account inside the host's credential-store lock,
+ * the same protocol the host's own lane follows: the account is re-read under
+ * the lock, a token another writer already rotated is adopted instead of being
+ * refreshed again, and the rotated refresh token is written back before the
+ * lock is released, so no writer is ever left holding a redeemed grant. Only an
+ * already expired token is refreshed; one still inside its lifetime is left for
+ * the chat lane, which may be using it right now.
+ */
+async function refreshExpiredAccount(
+	registry: QuotaModelRegistry,
+	hostId: string,
+	accountName: string,
+	options: ClaudeSdkOauthRefreshOptions,
+): Promise<AuthResolution> {
+	const modify = hostCall(registry.authStorage, "modify");
+	if (!modify) return TOKEN_EXPIRED;
+	const refresher = options.refresher ?? refreshWithAnthropicOAuth;
+	const signal = options.signal;
+
+	let latest: unknown;
+	try {
+		latest = await modify(
+			hostId,
+			async (current: unknown): Promise<unknown> => {
+				const accounts = storedAccounts(current);
+				const slot = findStoredAccount(current, accountName);
+				if (!accounts || slot === undefined) return undefined;
+				if (!isExpired(positiveNumber(readProperty(slot, "expires")))) return undefined;
+				const refreshToken = nonEmptyString(readProperty(slot, "refresh"));
+				if (refreshToken === undefined || refreshToken === CLAUDE_SDK_OAUTH_SENTINEL) {
+					return undefined;
+				}
+				const refreshed = await refresher(refreshToken, signal);
+				return {
+					...(current as object),
+					accounts: accounts.map((candidate) =>
+						candidate === slot
+							? {
+									...(candidate as object),
+									access: refreshed.access,
+									refresh: refreshed.refresh,
+									expires: refreshed.expires,
+								}
+							: candidate,
+					),
+				};
+			},
+			signal ? { signal } : undefined,
+		);
+	} catch (error) {
+		if (isAbortError(error) || signal?.aborted) throw error;
+		if (!isStoreBusyError(error)) return TOKEN_REFRESH_FAILED;
+		// Another writer, almost always a chat turn refreshing this same account,
+		// holds the store: adopt whatever it has written so far.
+		const read = hostCall(registry.authStorage, "read");
+		if (!read) return TOKEN_EXPIRED;
+		try {
+			latest = await read(hostId);
+		} catch {
+			return TOKEN_EXPIRED;
+		}
+	}
+	return usableStoredToken(latest, accountName);
+}
+
 /**
  * Reads one Claude SDK OAuth account's access token, or the only account's when
  * no name is given. The host resolves this provider's auth to a managed marker
  * rather than a token — the SDK subprocess owns the request, not senpi — so the
  * token is read from the account's own credential slot instead.
  *
- * An expired stored token is reported as such rather than sent: only the lane
- * that owns the credential may refresh it, and a rotated refresh token written
- * by anyone else would invalidate the account.
+ * An expired stored token is refreshed under the host's credential-store lock
+ * (see `refreshExpiredAccount`); a host without that lock, or an environment
+ * token that has no refresh grant, reports the token as expired instead.
  */
-export function resolveClaudeSdkOauthCredentials(
+export async function resolveClaudeSdkOauthCredentials(
 	registry: QuotaModelRegistry,
 	accountName?: string,
 	env: EnvReader = processEnv,
-): AuthResolution {
+	refresh: ClaudeSdkOauthRefreshOptions = {},
+): Promise<AuthResolution> {
 	const slots = claudeSdkOauthSlots(registry, env);
 	const slot =
 		accountName === undefined
 			? slots[0]
 			: slots.find((candidate) => candidate.account.name === accountName);
 	if (!slot) return NOT_CONFIGURED;
-	if (slot.expiresAt !== undefined && slot.expiresAt <= Date.now()) return TOKEN_EXPIRED;
-	return { ok: true, credentials: { accessToken: slot.accessToken } };
+	if (!isExpired(slot.expiresAt)) {
+		return { ok: true, credentials: { accessToken: slot.accessToken } };
+	}
+	if (slot.hostId === undefined) return TOKEN_EXPIRED;
+	return refreshExpiredAccount(registry, slot.hostId, slot.account.name, refresh);
 }
 
 async function flatAccessToken(

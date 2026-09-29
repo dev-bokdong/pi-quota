@@ -36,6 +36,7 @@ export type UnavailableReason =
 	| "oauth-not-configured"
 	| "unsupported-auth-method"
 	| "token-expired"
+	| "token-refresh-failed"
 	| "no-quota-windows";
 
 export interface ProviderUnavailable {

@@ -89,6 +89,8 @@ function formatWindow(window: QuotaWindow, now: Date): readonly string[] {
  */
 const UNAVAILABLE_MESSAGES = {
 	"token-expired": "the stored token has expired - sign in again to refresh it",
+	"token-refresh-failed":
+		"the stored token has expired and could not be refreshed - try again or sign in again",
 	"no-quota-windows": "no quota data in the response",
 } as const satisfies Partial<Record<UnavailableReason, string>>;
 

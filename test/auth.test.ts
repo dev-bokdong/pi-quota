@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { EnvReader, QuotaAuthModel, QuotaModelRegistry } from "../src/auth.ts";
+import type {
+	EnvReader,
+	QuotaAuthModel,
+	QuotaModelRegistry,
+	RefreshedTokens,
+	TokenRefresher,
+} from "../src/auth.ts";
 import {
 	listClaudeSdkOauthAccounts,
 	listQuotaAccounts,
@@ -399,17 +405,17 @@ describe("listClaudeSdkOauthAccounts", () => {
 	});
 });
 
-describe("resolveClaudeSdkOauthCredentials", () => {
-	it("resolves the only account without being given a name", () => {
+describe("resolveClaudeSdkOauthCredentials", async () => {
+	it("resolves the only account without being given a name", async () => {
 		const registry = claudeRegistry({ slots: [usableSlot("default", CLAUDE_TOKEN)] });
 
-		expect(resolveClaudeSdkOauthCredentials(registry, undefined, noEnv)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(registry, undefined, noEnv)).toEqual({
 			ok: true,
 			credentials: { accessToken: CLAUDE_TOKEN },
 		});
 	});
 
-	it("resolves the named account's own token", () => {
+	it("resolves the named account's own token", async () => {
 		const registry = claudeRegistry({
 			slots: [
 				usableSlot("default", `${CLAUDE_TOKEN}-default`),
@@ -417,80 +423,246 @@ describe("resolveClaudeSdkOauthCredentials", () => {
 			],
 		});
 
-		expect(resolveClaudeSdkOauthCredentials(registry, "login-2", noEnv)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(registry, "login-2", noEnv)).toEqual({
 			ok: true,
 			credentials: { accessToken: `${CLAUDE_TOKEN}-login-2` },
 		});
 	});
 
-	it("never falls back to a sibling account when the named one is unknown", () => {
+	it("never falls back to a sibling account when the named one is unknown", async () => {
 		const registry = claudeRegistry({ slots: [usableSlot("default", CLAUDE_TOKEN)] });
 
-		const result = resolveClaudeSdkOauthCredentials(registry, "login-2", noEnv);
+		const result = await resolveClaudeSdkOauthCredentials(registry, "login-2", noEnv);
 
 		expect(result).toEqual({ ok: false, reason: "oauth-not-configured" });
 		expect(JSON.stringify(result)).not.toContain(CLAUDE_TOKEN);
 	});
 
-	it("reports oauth-not-configured when the lane has no account at all", () => {
-		expect(resolveClaudeSdkOauthCredentials(claudeRegistry({}), undefined, noEnv)).toEqual({
+	it("reports oauth-not-configured when the lane has no account at all", async () => {
+		expect(await resolveClaudeSdkOauthCredentials(claudeRegistry({}), undefined, noEnv)).toEqual({
 			ok: false,
 			reason: "oauth-not-configured",
 		});
 	});
 
-	it("reports token-expired instead of sending a stale token", () => {
+	it("reports token-expired instead of sending a stale token", async () => {
 		const registry = claudeRegistry({
 			slots: [{ name: "default", access: CLAUDE_TOKEN, expires: Date.now() - 1000 }],
 		});
 
-		const result = resolveClaudeSdkOauthCredentials(registry, undefined, noEnv);
+		const result = await resolveClaudeSdkOauthCredentials(registry, undefined, noEnv);
 
 		expect(result).toEqual({ ok: false, reason: "token-expired" });
 		expect(JSON.stringify(result)).not.toContain(CLAUDE_TOKEN);
 	});
 
-	it("uses an account whose source reports no expiry", () => {
+	it("uses an account whose source reports no expiry", async () => {
 		const registry = claudeRegistry({
 			slots: [{ name: "default", access: CLAUDE_TOKEN, expires: 0 }],
 		});
 
-		expect(resolveClaudeSdkOauthCredentials(registry, undefined, noEnv)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(registry, undefined, noEnv)).toEqual({
 			ok: true,
 			credentials: { accessToken: CLAUDE_TOKEN },
 		});
 	});
 
-	it("prefers a stored account over an environment account of the same name", () => {
+	it("prefers a stored account over an environment account of the same name", async () => {
 		const registry = claudeRegistry({ slots: [usableSlot("env", `${CLAUDE_TOKEN}-stored`)] });
 		const env: EnvReader = (name) =>
 			name === "CLAUDE_CODE_OAUTH_TOKEN" ? `${CLAUDE_TOKEN}-env` : undefined;
 
-		expect(resolveClaudeSdkOauthCredentials(registry, "env", env)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(registry, "env", env)).toEqual({
 			ok: true,
 			credentials: { accessToken: `${CLAUDE_TOKEN}-stored` },
 		});
 	});
 
-	it("resolves an environment account by name", () => {
+	it("resolves an environment account by name", async () => {
 		const env: EnvReader = (name) =>
 			name === "CLAUDE_CODE_OAUTH_TOKEN_2" ? `${CLAUDE_TOKEN}-2` : undefined;
 
-		expect(resolveClaudeSdkOauthCredentials(claudeRegistry({}), "env-2", env)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(claudeRegistry({}), "env-2", env)).toEqual({
 			ok: true,
 			credentials: { accessToken: `${CLAUDE_TOKEN}-2` },
 		});
 	});
 
-	it("ignores an environment reader that throws", () => {
+	it("ignores an environment reader that throws", async () => {
 		const registry = claudeRegistry({ slots: [usableSlot("default", CLAUDE_TOKEN)] });
 		const env: EnvReader = () => {
 			throw new Error(`env read failed for ${CLAUDE_TOKEN}`);
 		};
 
-		expect(resolveClaudeSdkOauthCredentials(registry, undefined, env)).toEqual({
+		expect(await resolveClaudeSdkOauthCredentials(registry, undefined, env)).toEqual({
 			ok: true,
 			credentials: { accessToken: CLAUDE_TOKEN },
 		});
+	});
+});
+
+describe("resolveClaudeSdkOauthCredentials refreshing an expired stored token", () => {
+	const HOST_ID = "anthropic-subscription";
+	const ROTATED: RefreshedTokens = {
+		access: `${CLAUDE_TOKEN}-rotated`,
+		refresh: `${CLAUDE_TOKEN}-rotated-refresh`,
+		expires: Date.now() + HOUR_MS,
+	};
+
+	function expiredSlot(name: string): Record<string, unknown> {
+		return {
+			name,
+			access: `${CLAUDE_TOKEN}-${name}`,
+			refresh: `${CLAUDE_TOKEN}-${name}-refresh`,
+			expires: Date.now() - 1000,
+			source: "login",
+		};
+	}
+
+	/**
+	 * Host whose credential store serializes read-modify-write like the real
+	 * one: `modify` hands the callback the stored credential, keeps it when the
+	 * callback answers undefined, and answers with the credential it now holds.
+	 * `listed` is what the cached slot listing reports, which may lag the store.
+	 */
+	function lockedStore(options: {
+		readonly stored: Record<string, unknown>;
+		readonly listed?: readonly unknown[];
+		readonly modify?: () => never;
+	}) {
+		let credential = options.stored;
+		const registry = fakeRegistry({
+			authStorage: {
+				listSlots: (provider: string) =>
+					provider === HOST_ID ? (options.listed ?? credential["accounts"]) : [],
+				modify:
+					options.modify ??
+					(async (provider: string, fn: (current: unknown) => Promise<unknown>) => {
+						expect(provider).toBe(HOST_ID);
+						const next = await fn(credential);
+						if (next !== undefined) credential = next as Record<string, unknown>;
+						return credential;
+					}),
+				read: async (provider: string) => (provider === HOST_ID ? credential : undefined),
+			},
+		});
+		return { registry, current: () => credential };
+	}
+
+	function recordingRefresher(answer: () => Promise<RefreshedTokens>): {
+		readonly refresher: TokenRefresher;
+		readonly calls: string[];
+	} {
+		const calls: string[] = [];
+		return {
+			calls,
+			refresher: async (refreshToken) => {
+				calls.push(refreshToken);
+				return answer();
+			},
+		};
+	}
+
+	it("refreshes the expired account under the lock and writes only that account back", async () => {
+		const sibling = usableSlot("login-2", `${CLAUDE_TOKEN}-sibling`);
+		const store = lockedStore({
+			stored: { type: "oauth", pinned: "default", accounts: [expiredSlot("default"), sibling] },
+		});
+		const { refresher, calls } = recordingRefresher(async () => ROTATED);
+
+		const result = await resolveClaudeSdkOauthCredentials(store.registry, "default", noEnv, {
+			refresher,
+		});
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: ROTATED.access } });
+		expect(calls).toEqual([`${CLAUDE_TOKEN}-default-refresh`]);
+		expect(store.current()).toEqual({
+			type: "oauth",
+			pinned: "default",
+			accounts: [{ ...expiredSlot("default"), ...ROTATED, expires: ROTATED.expires }, sibling],
+		});
+	});
+
+	it("leaves a token that is about to expire but still valid to the chat lane", async () => {
+		const expiringSoon = { ...expiredSlot("default"), expires: Date.now() + 60_000 };
+		const store = lockedStore({ stored: { type: "oauth", accounts: [expiringSoon] } });
+		const { refresher, calls } = recordingRefresher(async () => ROTATED);
+
+		const result = await resolveClaudeSdkOauthCredentials(store.registry, undefined, noEnv, {
+			refresher,
+		});
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: `${CLAUDE_TOKEN}-default` } });
+		expect(calls).toEqual([]);
+		expect(store.current()).toEqual({ type: "oauth", accounts: [expiringSoon] });
+	});
+
+	it("adopts a token another writer rotated before the lock was taken", async () => {
+		const fresh = usableSlot("default", `${CLAUDE_TOKEN}-fresh`);
+		const store = lockedStore({
+			stored: { type: "oauth", accounts: [fresh] },
+			listed: [expiredSlot("default")],
+		});
+		const { refresher, calls } = recordingRefresher(async () => ROTATED);
+
+		const result = await resolveClaudeSdkOauthCredentials(store.registry, undefined, noEnv, {
+			refresher,
+		});
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: `${CLAUDE_TOKEN}-fresh` } });
+		expect(calls).toEqual([]);
+	});
+
+	it("reports token-refresh-failed and keeps the store when the grant cannot be redeemed", async () => {
+		const stored = { type: "oauth", accounts: [expiredSlot("default")] };
+		const store = lockedStore({ stored });
+		const { refresher } = recordingRefresher(async () => {
+			throw new Error(`invalid_grant for ${CLAUDE_TOKEN}`);
+		});
+
+		const result = await resolveClaudeSdkOauthCredentials(store.registry, undefined, noEnv, {
+			refresher,
+		});
+
+		expect(result).toEqual({ ok: false, reason: "token-refresh-failed" });
+		expect(JSON.stringify(result)).not.toContain(CLAUDE_TOKEN);
+		expect(store.current()).toBe(stored);
+	});
+
+	it("adopts the latest stored token when another writer holds the store", async () => {
+		const busy = Object.assign(new Error("Credential store is busy"), {
+			name: "CredentialStoreBusyError",
+		});
+		const store = lockedStore({
+			stored: { type: "oauth", accounts: [usableSlot("default", `${CLAUDE_TOKEN}-fresh`)] },
+			listed: [expiredSlot("default")],
+			modify: () => {
+				throw busy;
+			},
+		});
+		const { refresher, calls } = recordingRefresher(async () => ROTATED);
+
+		const result = await resolveClaudeSdkOauthCredentials(store.registry, undefined, noEnv, {
+			refresher,
+		});
+
+		expect(result).toEqual({ ok: true, credentials: { accessToken: `${CLAUDE_TOKEN}-fresh` } });
+		expect(calls).toEqual([]);
+	});
+
+	it("re-throws the caller's own cancellation during a refresh", async () => {
+		const controller = new AbortController();
+		const store = lockedStore({ stored: { type: "oauth", accounts: [expiredSlot("default")] } });
+		const refresher: TokenRefresher = async () => {
+			controller.abort();
+			throw controller.signal.reason;
+		};
+
+		await expect(
+			resolveClaudeSdkOauthCredentials(store.registry, undefined, noEnv, {
+				refresher,
+				signal: controller.signal,
+			}),
+		).rejects.toMatchObject({ name: "AbortError" });
 	});
 });

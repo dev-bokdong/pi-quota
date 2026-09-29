@@ -263,6 +263,18 @@ describe("formatQuotaResults", () => {
 		);
 	});
 
+	it("explains a Claude SDK token that could not be refreshed", () => {
+		const refreshFailed = {
+			kind: "unavailable",
+			provider: "claude-sdk-oauth",
+			reason: "token-refresh-failed",
+		} as const satisfies ProviderResult;
+
+		expect(formatQuotaResults([refreshFailed], now)).toBe(
+			"   [Claude SDK]: the stored token has expired and could not be refreshed - try again or sign in again",
+		);
+	});
+
 	it("does not throw for a successful result with empty windows", () => {
 		const emptySuccess = {
 			...openAiSuccess,

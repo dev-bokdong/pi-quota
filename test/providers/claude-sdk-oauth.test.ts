@@ -169,6 +169,44 @@ describe("fetchClaudeSdkOauthQuota", () => {
 		expect(calls).toHaveLength(0);
 	});
 
+	it("refreshes an expired stored token and reads the quota with the rotated one", async () => {
+		const { fetch, calls } = recordingFetch(() => usageResponse());
+		let credential: unknown = {
+			type: "oauth",
+			accounts: [
+				{ name: "default", access: SLOT_TOKEN, refresh: `${SLOT_TOKEN}-refresh`, expires: 1 },
+			],
+		};
+		const registry: QuotaModelRegistry = {
+			...claudeRegistry([]),
+			authStorage: {
+				listSlots: (provider: string) =>
+					provider === "anthropic-subscription"
+						? ((credential as { accounts: unknown[] }).accounts ?? [])
+						: [],
+				modify: async (_provider: string, fn: (current: unknown) => Promise<unknown>) => {
+					const next = await fn(credential);
+					if (next !== undefined) credential = next;
+					return credential;
+				},
+			},
+		};
+
+		const result = await fetchClaudeSdkOauthQuota(registry, {
+			fetch,
+			env: emptyEnv(),
+			refresher: async () => ({
+				access: `${SLOT_TOKEN}-rotated`,
+				refresh: `${SLOT_TOKEN}-rotated-refresh`,
+				expires: Date.now() + HOUR_MS,
+			}),
+		});
+
+		expect(result).toMatchObject({ kind: "success", provider: "claude-sdk-oauth" });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.headers["Authorization"]).toBe(`Bearer ${SLOT_TOKEN}-rotated`);
+	});
+
 	it("reports unavailable and sends nothing when the lane has no account", async () => {
 		const { fetch, calls } = recordingFetch(() => usageResponse());
 
