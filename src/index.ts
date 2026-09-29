@@ -5,8 +5,6 @@ import { formatQuotaResults, notifySeverityForResults, whiteText } from "./forma
 import { fetchAnthropicQuota } from "./providers/anthropic.ts";
 import { fetchClaudeSdkOauthQuota } from "./providers/claude-sdk-oauth.ts";
 import { fetchOpenAiQuota } from "./providers/openai.ts";
-import type { QuotaRecovery } from "./recovery.ts";
-import { prepareQuotaRecovery } from "./recovery.ts";
 import type { AccountFields, ProviderId, ProviderResult, QuotaAccount } from "./types.ts";
 import { accountFields } from "./types.ts";
 
@@ -27,31 +25,19 @@ function isAbortError(error: unknown): boolean {
  * provider's answer or crash the command.
  */
 function guarded(
-	pending: Promise<AccountLookup>,
+	pending: Promise<ProviderResult>,
 	provider: ProviderId,
 	account: AccountFields,
-): Promise<AccountLookup> {
-	return pending.catch((error: unknown): AccountLookup => {
+): Promise<ProviderResult> {
+	return pending.catch((error: unknown): ProviderResult => {
 		if (isAbortError(error)) throw error;
-		return {
-			result: { kind: "failure", provider, reason: { type: "invalid-response" }, ...account },
-		};
+		return { kind: "failure", provider, reason: { type: "invalid-response" }, ...account };
 	});
 }
 
 interface QuotaLookupOptions {
 	readonly signal: AbortSignal;
 	readonly account?: QuotaAccount;
-}
-
-/**
- * One account's answer together with the reconciliation that decides what its
- * recorded block should become once the quota is known. The two travel together
- * so an account's block state is never matched to another account's answer.
- */
-interface AccountLookup {
-	readonly result: ProviderResult;
-	readonly reconcile?: QuotaRecovery | undefined;
 }
 
 /**
@@ -63,18 +49,14 @@ interface AccountLookup {
 function providerLookups(
 	provider: ProviderId,
 	accounts: readonly QuotaAccount[],
-	fetchQuota: (options: QuotaLookupOptions) => Promise<AccountLookup>,
+	fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
 	signal: AbortSignal,
-): readonly Promise<AccountLookup>[] {
-	if (accounts.length === 0) {
+): readonly Promise<ProviderResult>[] {
+	if (accounts.length < 2) {
 		return [guarded(fetchQuota({ signal }), provider, {})];
 	}
 	return accounts.map((account) =>
-		guarded(fetchQuota({ signal, account }), provider, accountFields(account)).then((lookup) => {
-			if (accounts.length > 1) return lookup;
-			const { account: _label, ...unlabelled } = lookup.result;
-			return { ...lookup, result: unlabelled };
-		}),
+		guarded(fetchQuota({ signal, account }), provider, accountFields(account)),
 	);
 }
 
@@ -86,11 +68,15 @@ function providerLookups(
 function claudeSdkOauthLookups(
 	registry: QuotaModelRegistry,
 	signal: AbortSignal,
-	fetchQuota: (options: QuotaLookupOptions) => Promise<AccountLookup>,
-): readonly Promise<AccountLookup>[] {
+): readonly Promise<ProviderResult>[] {
 	const accounts = listClaudeSdkOauthAccounts(registry);
 	if (accounts.length === 0) return [];
-	return providerLookups("claude-sdk-oauth", accounts, fetchQuota, signal);
+	return providerLookups(
+		"claude-sdk-oauth",
+		accounts,
+		(options) => fetchClaudeSdkOauthQuota(registry, options),
+		signal,
+	);
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -116,58 +102,21 @@ export default function (pi: ExtensionAPI): void {
 			ctx.ui.setStatus(STATUS_KEY, LOADING_STATUS);
 			try {
 				const registry = ctx.modelRegistry;
-				let recoveryFailed = false;
-				const withRecovery =
-					(
-						provider: ProviderId,
-						fetchQuota: (options: QuotaLookupOptions) => Promise<ProviderResult>,
-					) =>
-					async (options: QuotaLookupOptions): Promise<AccountLookup> => {
-						// Persistence is best-effort; errors must never hide the quota.
-						let reconcile: QuotaRecovery | undefined;
-						try {
-							reconcile = await prepareQuotaRecovery(registry, provider, options.account);
-						} catch {
-							recoveryFailed = true;
-						}
-						return { result: await fetchQuota(options), reconcile };
-					};
-				const lookups = await Promise.all([
+				const results = await Promise.all([
 					...providerLookups(
 						"openai-codex",
-						listQuotaAccounts(registry, "openai-codex", true),
-						withRecovery("openai-codex", (options) => fetchOpenAiQuota(registry, options)),
+						listQuotaAccounts(registry, "openai-codex"),
+						(options) => fetchOpenAiQuota(registry, options),
 						controller.signal,
 					),
 					...providerLookups(
 						"anthropic",
-						listQuotaAccounts(registry, "anthropic", true),
-						withRecovery("anthropic", (options) => fetchAnthropicQuota(registry, options)),
+						listQuotaAccounts(registry, "anthropic"),
+						(options) => fetchAnthropicQuota(registry, options),
 						controller.signal,
 					),
-					...claudeSdkOauthLookups(
-						registry,
-						controller.signal,
-						withRecovery("claude-sdk-oauth", (options) =>
-							fetchClaudeSdkOauthQuota(registry, options),
-						),
-					),
+					...claudeSdkOauthLookups(registry, controller.signal),
 				]);
-				if (currentController !== controller) return;
-				const results: ProviderResult[] = [];
-				for (const lookup of lookups) {
-					let blocked = false;
-					try {
-						blocked = (await lookup.reconcile?.(lookup.result, controller.signal)) ?? false;
-					} catch {
-						recoveryFailed = true;
-					}
-					results.push(
-						blocked && lookup.result.kind === "success"
-							? { ...lookup.result, blocked }
-							: lookup.result,
-					);
-				}
 				if (currentController !== controller) return;
 				// A provider holding no OAuth is not part of the answer, so an
 				// invocation that could read nothing has nothing to say and stays
@@ -175,12 +124,6 @@ export default function (pi: ExtensionAPI): void {
 				const block = formatQuotaResults(results);
 				if (block !== "") {
 					ctx.ui.notify(whiteText(block), notifySeverityForResults(results));
-				}
-				if (recoveryFailed) {
-					ctx.ui.notify(
-						"Could not update quota rate-limit blocks. Quota results are unchanged.",
-						"warning",
-					);
 				}
 			} catch {
 				// Only this invocation's own cancellation reaches here, which means a
